@@ -42,7 +42,8 @@ public class AppLauncherService(IProcessRunner runner, ILogService log) : IAppLa
             if (settings.ExecutionMode == "RunOnly") command += "$p.NoBuild=$true; ";
             command += "try { & " + CommandArguments.PowerShellLiteral(script) + " @p; if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE } } catch { Write-Error $_; exit 1 }";
             var result = await runner.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell(command), repoRoot, onOutputLine, cancellationToken,
-                environmentVariables: new() { ["BEACON_LAUNCH_JSON"] = json, ["BEACON_REPO_ROOT"] = repoRoot });
+                environmentVariables: new() { ["BEACON_LAUNCH_JSON"] = json, ["BEACON_REPO_ROOT"] = repoRoot },
+                maximumCapturedOutputCharacters: 4 * 1024 * 1024);
             return result.ExitCode;
         }
         finally

@@ -8,6 +8,8 @@ namespace BeaconSetupManager
     public partial class RepoRecoveryDialog : Window
     {
         public RepoRecoveryAction Result { get; private set; } = RepoRecoveryAction.Cancel;
+        private readonly bool _allowStartFresh;
+        public Visibility StartFreshVisibility => _allowStartFresh ? Visibility.Visible : Visibility.Collapsed;
 
         // View model properties for data binding
         public string StatusDescription { get; }
@@ -44,9 +46,10 @@ namespace BeaconSetupManager
 
         private readonly RepositoryAnalysisResult _result;
 
-        public RepoRecoveryDialog(RepositoryAnalysisResult result)
+        public RepoRecoveryDialog(RepositoryAnalysisResult result, bool allowStartFresh = true)
         {
             _result = result;
+            _allowStartFresh = allowStartFresh;
             
             // 1. Build diagnostics dashboard parameters
             if (result.IsHealthy)
@@ -172,6 +175,7 @@ namespace BeaconSetupManager
 
         private void StartFresh_Click(object sender, RoutedEventArgs e)
         {
+            if (!_allowStartFresh) return;
             var confirm = MessageBox.Show(
                 "Are you sure you want to start fresh?\n\nThis will completely delete the existing repository directory and run a clean clone. All uncommitted changes will be lost.",
                 "Confirm Start Fresh",

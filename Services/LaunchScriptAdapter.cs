@@ -83,10 +83,18 @@ if (-not (Test-Path (Join-Path $frontendDir 'AvaClient.Desktop.exe'))) { throw '
 $pagesPath = if ([IO.Path]::IsPathRooted($PagesFile)) { $PagesFile } else { Join-Path $frontendDir $PagesFile }
 if (-not (Test-Path $pagesPath)) { throw 'The selected pages file is missing.' }
 $endpoint = [Uri](($Urls -split ';')[0].Replace('*', 'localhost').Replace('+', 'localhost'))
-$endpointHost = if ($endpoint.Host -eq '[::1]') { '::1' } else { '127.0.0.1' }
-$probe = New-Object Net.Sockets.TcpClient
+$endpointHost = $endpoint.DnsSafeHost
+$endpointAddress = $null
+$endpointFamily = [Net.Sockets.AddressFamily]::InterNetwork
+if ([Net.IPAddress]::TryParse($endpointHost, [ref]$endpointAddress)) {
+    $endpointFamily = $endpointAddress.AddressFamily
+    if ($endpointAddress.Equals([Net.IPAddress]::Any)) { $endpointHost = '127.0.0.1' }
+    elseif ($endpointAddress.Equals([Net.IPAddress]::IPv6Any)) { $endpointHost = '::1' }
+    else { $endpointHost = $endpointAddress.ToString() }
+} elseif ($endpointHost -eq 'localhost') { $endpointHost = '127.0.0.1' }
+$probe = [Net.Sockets.TcpClient]::new($endpointFamily)
 $occupied = $false
-try { $connection = $probe.ConnectAsync($endpointHost, $endpoint.Port); $occupied = $connection.Wait(200) -and $probe.Connected } catch {} finally { $probe.Dispose() }
+try { $connection = $probe.ConnectAsync($endpointHost, $endpoint.Port); $occupied = $connection.Wait(2000) -and $probe.Connected } catch {} finally { $probe.Dispose() }
 if ($occupied) { throw "Backend port $($endpoint.Port) is already in use. Choose another URL or stop the existing listener." }
 try {
 # 4. Launch Backend
@@ -101,7 +109,7 @@ $ready = $false
 for ($attempt = 0; $attempt -lt 150; $attempt++) {
     $backendProcess.Refresh()
     if ($backendProcess.HasExited) { throw "Backend exited during startup with code $($backendProcess.ExitCode)." }
-    $client = New-Object Net.Sockets.TcpClient
+    $client = [Net.Sockets.TcpClient]::new($endpointFamily)
     try {
         $connection = $client.ConnectAsync($endpointHost, $endpoint.Port)
         if ($connection.Wait(200) -and $client.Connected) { $ready = $true; break }

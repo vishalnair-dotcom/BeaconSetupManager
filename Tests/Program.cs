@@ -13,12 +13,18 @@ internal static class Program
     private static readonly string Root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", ".."));
     private static string Scratch = "";
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         Scratch = Path.Combine(Root, "artifacts", "validation", "regression-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Scratch);
         SettingsStore.DirectoryOverride = Path.Combine(Scratch, "settings-store");
-        try { RunAsync().GetAwaiter().GetResult(); VerifyUi(); Console.WriteLine($"PASS: {_passed} regression checks."); return 0; }
+        try
+        {
+            if (!args.Contains("--ui-only")) RunAsync().GetAwaiter().GetResult();
+            VerifyUi();
+            Console.WriteLine($"PASS: {_passed} regression checks.");
+            return 0;
+        }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
     }
     private static void Check(bool condition, string name)
@@ -132,6 +138,21 @@ internal static class Program
         Check(true, "Thirty immediate-exit processes finish without event races");
         var output = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell("1..100 | ForEach-Object { [Console]::Out.WriteLine('out-' + $_); [Console]::Error.WriteLine('err-' + $_) }"), context: ProcessExecutionContext.Elevated);
         Check(output.StandardOutput.Contains("out-100") && output.StandardError.Contains("err-100"), "Drain both output streams before returning");
+        foreach (var context in new[] { ProcessExecutionContext.CurrentUser, ProcessExecutionContext.Elevated })
+        {
+            int streamed = 0;
+            var bounded = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell(
+                "1..200 | ForEach-Object { [Console]::Out.WriteLine(('out-' + $_ + ':' + ('x' * 100))); [Console]::Error.WriteLine(('err-' + $_ + ':' + ('y' * 100))) }"),
+                onOutputLine: _ => streamed++, context: context, maximumCapturedOutputCharacters: 2048);
+            Check(bounded.ExitCode == 0 && streamed == 400 && bounded.StandardOutput.Length <= 2048 && bounded.StandardError.Length <= 2048 &&
+                bounded.StandardOutput.Contains("out-200:") && bounded.StandardError.Contains("err-200:") && !bounded.StandardOutput.Contains("out-1:"),
+                "Bounded capture retains the tail while streaming every output line: " + context);
+        }
+        int longLineLength = 0;
+        var longLine = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell("[Console]::WriteLine(('x' * 8000) + 'end-marker')"),
+            onOutputLine: line => longLineLength = line.Length, maximumCapturedOutputCharacters: 2048);
+        Check(longLine.ExitCode == 0 && longLine.StandardOutput.Length <= 2048 && longLine.StandardOutput.Contains("end-marker") && longLineLength == 8010,
+            "A single oversized output line stays bounded without truncating the streaming callback");
         using (var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
         {
             var childSeen = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -166,9 +187,16 @@ internal static class Program
         var state = await localGit.AnalyzeRepositoryAsync(repo, "", "");
         Check(state.State == RepositoryState.LocalModifications && state.ModifiedFiles.Contains("untracked file.txt"), "Untracked paths make repository dirty");
         Check(await localGit.StashChangesAsync(repo) && !File.Exists(Path.Combine(repo, "untracked file.txt")), "Recovery stash includes untracked files");
-        var addSubmodule = await localRunner.RunAsync("git", "-c protocol.file.allow=always submodule add -b main " + CommandArguments.Quote(origin) + " nested-module", repo);
-        if (addSubmodule.ExitCode != 0) throw new IOException(addSubmodule.StandardError);
-        await localRunner.RunAsync("git", "commit -am add-submodule", repo);
+        // Register an old-form submodule so fixtures do not need Git to rewrite a protected .git pointer file.
+        var cloneSubmodule = await localRunner.RunAsync("git", "clone -b main " + CommandArguments.Quote(origin) + " nested-module", repo);
+        if (cloneSubmodule.ExitCode != 0) throw new IOException(cloneSubmodule.StandardError);
+        await localRunner.RunAsync("git", "config user.email regression@example.invalid", Path.Combine(repo, "nested-module"));
+        await localRunner.RunAsync("git", "config user.name Regression", Path.Combine(repo, "nested-module"));
+        File.WriteAllText(Path.Combine(repo, ".gitmodules"), "[submodule \"nested-module\"]\n\tpath = nested-module\n\turl = " + origin.Replace('\\', '/') + "\n\tbranch = main\n");
+        var registerSubmodule = await localRunner.RunAsync("git", "add .gitmodules nested-module", repo);
+        if (registerSubmodule.ExitCode != 0) throw new IOException(registerSubmodule.StandardError);
+        var commitSubmodule = await localRunner.RunAsync("git", "commit -m add-submodule", repo);
+        if (commitSubmodule.ExitCode != 0) throw new IOException(commitSubmodule.StandardError);
         string nestedFile = Path.Combine(repo, "nested-module", "file with spaces.txt");
         File.WriteAllText(nestedFile, "nested local edit");
         Check(await localGit.StashChangesAsync(repo) && File.ReadAllText(nestedFile) == "first", "Recovery stashes tracked edits inside submodules");
@@ -185,6 +213,32 @@ internal static class Program
             string source = File.ReadAllText(beacon);
             Throws<NotSupportedException>(() => LaunchScriptAdapter.Adapt(source + "\nWrite-Output 'custom cleanup'"), "Reject legacy adaptation that would bypass custom cleanup logic");
             string adapted = LaunchScriptAdapter.Adapt(source);
+            // Exercise the actual generated probe against a non-default loopback address.
+            int probeStart = adapted.IndexOf("$endpoint = [Uri]", StringComparison.Ordinal);
+            int probeEnd = adapted.IndexOf("if ($occupied)", probeStart, StringComparison.Ordinal);
+            string probeCode = adapted[probeStart..probeEnd];
+            var address = System.Net.IPAddress.Parse("127.0.0.2");
+            var addressListener = new System.Net.Sockets.TcpListener(address, 0);
+            addressListener.Start();
+            try
+            {
+                int addressPort = ((System.Net.IPEndPoint)addressListener.LocalEndpoint).Port;
+                var addressResult = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell(
+                    "$Urls='http://127.0.0.2:" + addressPort + "'; " + probeCode + "; [Console]::WriteLine(('host={0}; occupied={1}' -f $endpointHost,$occupied)); if (-not $occupied -or $endpointHost -ne '127.0.0.2') { exit 1 }"),
+                    context: ProcessExecutionContext.Elevated);
+                Check(addressResult.ExitCode == 0, "Legacy probe detects a listener bound only to the configured interface" +
+                    (addressResult.ExitCode == 0 ? "" : ": " + addressResult.StandardOutput + addressResult.StandardError));
+            }
+            finally { addressListener.Stop(); }
+            foreach (var (url, expected) in new[] { ("http://0.0.0.0:80", "127.0.0.1"), ("http://*:80", "127.0.0.1"),
+                ("http://+:80", "127.0.0.1"), ("http://[::]:80", "::1"), ("http://[::1]:80", "::1") })
+            {
+                string endpointCode = probeCode[..probeCode.IndexOf("$probe =", StringComparison.Ordinal)];
+                var mapped = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell(
+                    "$Urls=" + CommandArguments.PowerShellLiteral(url) + "; " + endpointCode + "; [Console]::WriteLine($endpointHost)"),
+                    context: ProcessExecutionContext.Elevated);
+                Check(mapped.ExitCode == 0 && mapped.StandardOutput.Trim() == expected, "Legacy probe resolves wildcard/IPv6 host: " + url);
+            }
             var adaptedPath = Path.Combine(Scratch, "adapted.ps1"); File.WriteAllText(adaptedPath, adapted);
             string syntax = "$e=$null; $null=[System.Management.Automation.Language.Parser]::ParseFile(" + CommandArguments.PowerShellLiteral(adaptedPath) + ",[ref]$null,[ref]$e); if($e){$e | ForEach-Object {$_.Message}; exit 1}";
             var syntaxResult = await real.RunAsync("powershell.exe", CommandArguments.EncodedPowerShell(syntax), context: ProcessExecutionContext.Elevated);
@@ -195,6 +249,7 @@ internal static class Program
             var launcher = new AppLauncherService(fixture, new TestLog());
             var messages = new List<string>();
             Check(await launcher.RunScriptAsync(scriptRoot, new LaunchSettings { ExecutionMode = "BuildOnly" }, messages.Add, CancellationToken.None) == 0 && messages.Any(line => line.Contains("BuildOnly mode requested")), "Legacy BuildOnly exits without starting backend/frontend");
+            Check(fixture.LastCaptureLimit == 4 * 1024 * 1024, "Application sessions request bounded native output capture");
             fixture.BuildExitCode = 7;
             Check(await launcher.RunScriptAsync(scriptRoot, new LaunchSettings { ExecutionMode = "BuildAndRun" }, _ => { }, CancellationToken.None) == 7, "Failed build stops legacy launch with original exit code");
             Check(File.ReadAllText(Path.Combine(scriptRoot, "run.ps1")) == source, "Launcher retains original run.ps1 byte content");
@@ -285,7 +340,93 @@ internal static class Program
             foreach (string key in new[] { "WarningAlertBackgroundBrush", "WarningAlertBorderBrush", "WarningAlertTextBrush" })
                 Check(window.TryFindResource(key) is System.Windows.Media.Brush, theme + " theme resolves " + key);
         }
+        var recovery = new BeaconSetupManager.RepoRecoveryDialog(new RepositoryAnalysisResult { State = RepositoryState.SubmodulesUninitialized }, allowStartFresh: false);
+        recovery.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        var startFresh = (System.Windows.Controls.Button)recovery.FindName("StartFreshButton");
+        Check(startFresh.Visibility == System.Windows.Visibility.Collapsed, "Update Branch recovery does not offer destructive Start Fresh");
+        typeof(BeaconSetupManager.RepoRecoveryDialog).GetMethod("StartFresh_Click", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+            .Invoke(recovery, new object[] { startFresh, new System.Windows.RoutedEventArgs() });
+        Check(recovery.Result == RepoRecoveryAction.Cancel, "A disabled Start Fresh handler cannot request workspace deletion");
+        recovery.Close();
+        var setupRecovery = new BeaconSetupManager.RepoRecoveryDialog(new RepositoryAnalysisResult { State = RepositoryState.SubmodulesUninitialized });
+        setupRecovery.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        Check(((System.Windows.Controls.Button)setupRecovery.FindName("StartFreshButton")).Visibility == System.Windows.Visibility.Visible,
+            "Setup retains its explicitly confirmed Start Fresh action");
+        setupRecovery.Close();
+
+        string retryPath = Path.Combine(Scratch, "retry-build-workspace");
+        Directory.CreateDirectory(Path.Combine(retryPath, ".git"));
+        File.WriteAllText(Path.Combine(retryPath, "run.ps1"), "# fixture");
+        File.WriteAllText(Path.Combine(retryPath, "Beacon.sln"), "fixture");
+        var commands = new List<string>();
+        var retryRunner = new FakeRunner { Response = args => { commands.Add(args); return FakeRunner.Result(0, args.Contains("rev-parse HEAD") ? new string('a', 40) : "true"); } };
+        var retryLauncher = new RetryLauncher();
+        var retrySettings = new LaunchSettingsService();
+        retrySettings.Save(retryPath, new LaunchSettings { ExecutionMode = "RunOnly", Configuration = "Release" });
+        using var retryModel = new MainViewModel(new FakePrerequisites(), new GitService(retryRunner, log), new DatabaseService(), new ConfigService(), log,
+            new FakeAdmin(), retryLauncher, retryRunner, retrySettings);
+        retryModel.SelectedAction = "UpdateBranch";
+        retryModel.LocalPath = retryPath;
+        var confirmDialogs = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
+        confirmDialogs.Tick += (_, _) =>
+        {
+            foreach (var dialog in app.Windows.OfType<BeaconSetupManager.LaunchConfigurationDialog>().Where(dialog => dialog.IsVisible).ToArray())
+                typeof(BeaconSetupManager.LaunchConfigurationDialog).GetMethod("Build_Click", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!
+                    .Invoke(dialog, new object[] { dialog, new System.Windows.RoutedEventArgs() });
+        };
+        confirmDialogs.Start();
+        try
+        {
+            new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
+            app.MainWindow = window;
+            RunUiTask(retryModel.ConfirmBuildAsync);
+            Check(retryLauncher.Calls == 1 && retryModel.CanRetryExecution && !retryModel.IsBusy, "Cancelled optional build offers retry and releases operation state");
+            commands.Clear();
+            RunUiTask(retryModel.RetryExecutionAsync);
+            Check(retryLauncher.Calls == 2 && retryModel.ExecutionSuccess && retryModel.SelectedAction == "UpdateBranch" &&
+                !commands.Any(command => command.Contains("fetch") || command.Contains("checkout") || command.Contains("pull")),
+                "Retry after optional build restarts the build without fetching or checking out the branch");
+            Check(retryModel.IsRunApplicationPromptVisible && retrySettings.Load(retryPath).ExecutionMode == "RunOnly" && retrySettings.Load(retryPath).Configuration == "Release",
+                "Retried optional build preserves run preferences and offers to run the application");
+            retryLauncher.CancelNext = true;
+            RunUiTask(retryModel.ConfirmBuildAsync);
+            retryModel.Branch = "changed-after-cancellation";
+            RunUiTask(retryModel.RetryExecutionAsync);
+            Check(retryLauncher.Calls == 3 && !retryModel.CanRetryExecution, "Changing source invalidates a captured build retry");
+            retryModel.LocalPath = Path.Combine(Scratch, "missing-build-workspace");
+            RunUiTask(retryModel.ConfirmBuildAsync);
+            Check(retryLauncher.Calls == 3 && !retryModel.IsBusy, "Optional build revalidates its workspace before launching");
+        }
+        finally { confirmDialogs.Stop(); }
         window.Close(); app.Shutdown();
+    }
+
+    private static void RunUiTask(Func<Task> action)
+    {
+        var dispatcher = System.Windows.Threading.Dispatcher.CurrentDispatcher;
+        var frame = new System.Windows.Threading.DispatcherFrame();
+        Exception? failure = null;
+        dispatcher.BeginInvoke(new Action(async () =>
+        {
+            try { await action(); }
+            catch (Exception ex) { failure = ex; }
+            finally { frame.Continue = false; }
+        }));
+        System.Windows.Threading.Dispatcher.PushFrame(frame);
+        if (failure != null) throw new Exception("UI workflow regression failed.", failure);
+    }
+}
+
+internal sealed class RetryLauncher : IAppLauncherService
+{
+    public int Calls { get; private set; }
+    public bool CancelNext { get; set; } = true;
+    public Task<int> RunScriptAsync(string repoRoot, LaunchSettings settings, Action<string> onOutputLine, CancellationToken cancellationToken)
+    {
+        Calls++;
+        if (CancelNext) { CancelNext = false; throw new OperationCanceledException(); }
+        onOutputLine("BEACON_BUILD_EXIT:0");
+        return Task.FromResult(0);
     }
 }
 
@@ -301,25 +442,27 @@ internal class FakeRunner : IProcessRunner
 {
     public Func<string, ProcessResult> Response { get; set; } = _ => Result(0);
     public static ProcessResult Result(int code, string output = "", string error = "") => new(code, output, error, TimeSpan.Zero, false, ProcessExecutionContext.CurrentUser, -1);
-    public virtual Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser) => Task.FromResult(Response(arguments));
+    public virtual Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser, int? maximumCapturedOutputCharacters = null) => Task.FromResult(Response(arguments));
     public bool StartBackground(string fileName, string arguments, string workingDirectory = "", ProcessExecutionContext context = ProcessExecutionContext.CurrentUser) => false;
     public void EnsureDirectoryExists(string path) => Directory.CreateDirectory(path);
     public bool FixDirectoryOwnership(string path) => false;
 }
 internal sealed class LocalRunner(ProcessRunner runner) : FakeRunner
 {
-    public override Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser)
-        => runner.RunAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated);
+    public override Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser, int? maximumCapturedOutputCharacters = null)
+        => runner.RunAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated, maximumCapturedOutputCharacters);
 }
 internal sealed class ScriptFixtureRunner(ProcessRunner runner, int buildExitCode) : FakeRunner
 {
     public int BuildExitCode { get; set; } = buildExitCode;
+    public int? LastCaptureLimit { get; private set; }
     public bool FailFrontend { get; set; }
     public int Port { get; set; }
-    public override Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser)
+    public override Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser, int? maximumCapturedOutputCharacters = null)
     {
         if (environmentVariables?.ContainsKey("BEACON_LAUNCH_JSON") == true)
         {
+            LastCaptureLimit = maximumCapturedOutputCharacters;
             string command = Encoding.Unicode.GetString(Convert.FromBase64String(arguments.Split(' ').Last()));
             command = "function dotnet { $global:LASTEXITCODE=" + BuildExitCode + "; Write-Host 'fake build' }; " + command;
             if (FailFrontend)
@@ -330,7 +473,7 @@ internal sealed class ScriptFixtureRunner(ProcessRunner runner, int buildExitCod
             }
             arguments = CommandArguments.EncodedPowerShell(command);
         }
-        return runner.RunAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated);
+        return runner.RunAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated, maximumCapturedOutputCharacters);
     }
 }
 internal class FakePrerequisites : IPrerequisiteService

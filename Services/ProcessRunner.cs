@@ -26,7 +26,8 @@ namespace BeaconSetupManager.Services
             CancellationToken cancellationToken = default,
             string? stdInput = null,
             System.Collections.Generic.Dictionary<string, string>? environmentVariables = null,
-            ProcessExecutionContext context = ProcessExecutionContext.CurrentUser)
+            ProcessExecutionContext context = ProcessExecutionContext.CurrentUser,
+            int? maximumCapturedOutputCharacters = null)
         {
             _logService.LogInfo("ProcessRunner", $"Starting process: '{fileName}' Directory: '{workingDirectory}'. Context: {context}");
 
@@ -44,7 +45,8 @@ namespace BeaconSetupManager.Services
                         onOutputLine,
                         cancellationToken,
                         stdInput,
-                        environmentVariables);
+                        environmentVariables,
+                        maximumCapturedOutputCharacters);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception ex)
@@ -67,7 +69,7 @@ namespace BeaconSetupManager.Services
             else
             {
                 // Run elevated (standard process execution under current elevated context)
-                result = await RunStandardProcessAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables);
+                result = await RunStandardProcessAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, maximumCapturedOutputCharacters);
             }
 
             stopwatch.Stop();
@@ -128,9 +130,10 @@ namespace BeaconSetupManager.Services
 
         private Task<ProcessResult> RunStandardProcessAsync(
             string fileName, string arguments, string workingDirectory, Action<string>? onOutputLine,
-            CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables)
+            CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables,
+            int? maximumCapturedOutputCharacters)
             => _interactiveProcessLauncher.RunAsManagerAsync(fileName, arguments, workingDirectory, onOutputLine,
-                cancellationToken, stdInput, environmentVariables);
+                cancellationToken, stdInput, environmentVariables, maximumCapturedOutputCharacters);
         private void LogProcessOutcome(string fileName, ProcessResult result)
         {
             string outcome = result.ExitCode == 0 ? "SUCCESS" : "FAILED";

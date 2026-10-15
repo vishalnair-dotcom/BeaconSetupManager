@@ -1,5 +1,7 @@
 # Setup manager fixes and verification
 
+For the 2026-10-15 code review follow-up, see [REVIEW_FIXES.md](REVIEW_FIXES.md).
+
 Implemented 2026-10-14 in the BeaconSetupManager workspace. The external Beacon repository and its run.ps1 are unchanged.
 
 ## Changes

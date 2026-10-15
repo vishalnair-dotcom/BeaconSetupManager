@@ -14,11 +14,13 @@ namespace BeaconSetupManager.Services
             Action<string>? onOutputLine,
             CancellationToken cancellationToken,
             string? stdInput,
-            Dictionary<string, string>? environmentVariables);
+            Dictionary<string, string>? environmentVariables,
+            int? maximumCapturedOutputCharacters = null);
 
         Task<ProcessResult> RunAsManagerAsync(
             string fileName, string arguments, string workingDirectory, Action<string>? onOutputLine,
-            CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables);
+            CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables,
+            int? maximumCapturedOutputCharacters = null);
 
         bool StartAsCurrentUser(
             string fileName,

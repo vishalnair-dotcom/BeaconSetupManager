@@ -24,6 +24,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private CancellationTokenSource? _cts, _validationCts;
     private Operation? _operation;
+    private Operation? _retryOperation;
     private bool _loading, _disposed;
     private int _inputVersion;
     private string _verifiedUrl = "";
@@ -31,7 +32,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private DispatcherTimer? _monitor;
     private int? _backendPid, _frontendPid;
     private DateTime _started;
-    private record Operation(string Action, string Path, string Url, string Source, LaunchSettings Settings);
+    private record Operation(string Action, string Path, string Url, string Source, LaunchSettings Settings)
+    {
+        public string PreferredRunMode { get; init; } = Settings.ExecutionMode;
+    }
     public event Action? OnLogCleared;
 
     [ObservableProperty] private int _currentStep = 1;
@@ -73,8 +77,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public bool HasLastSuccessfulVerificationText => !string.IsNullOrEmpty(LastSuccessfulVerificationText);
     public bool IsSourceMetadataVisible => SourceValidationStatus == "Success";
     public bool HasPrerequisiteWarnings => Prerequisites.Any(item => item.Status is ValidationStatus.Missing or ValidationStatus.Failed or ValidationStatus.VersionMismatch);
-    public bool CanExecuteAction => !IsBusy && IsWorkspaceValidated && (!IsStandardConfigAction ||
-        (RepoValidationStatus == "Success" && (SelectedAction is "Setup" or "Repair" || SourceValidationStatus == "Success" || _workspaceNeedsOwnershipRepair)));
+    public bool CanExecuteAction => CanStartAction(SelectedAction);
+    private bool CanStartAction(string action) => !_disposed && !IsBusy && IsWorkspaceValidated && (action is not ("Setup" or "UpdateBranch" or "Repair") ||
+        (RepoValidationStatus == "Success" && (action is "Setup" or "Repair" || SourceValidationStatus == "Success" || _workspaceNeedsOwnershipRepair)));
     public string ActionButtonText => SelectedAction switch { "Setup" => "Setup", "UpdateBranch" => "Update", "DatabaseSetup" => "Configure", "RunApplication" => "Run", _ => SelectedAction };
     public bool CanContinueToDbSetup => !IsBusy && BuildStatusText == "✓ Succeeded" && SelectedAction is "Setup" or "Repair";
 
@@ -145,6 +150,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     private void ClearResults()
     {
+        _retryOperation = null;
         IsExecutionFinished = false; ExecutionSuccess = false; CanRetryExecution = false;
         IsBuildResultsVisible = false; IsBuildPromptVisible = false; IsRunApplicationPromptVisible = false; IsDbSetupFormVisible = false;
         BuildStatusText = ""; BuildOutputText = ""; BuildErrorsText = "";
@@ -164,13 +170,15 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     [RelayCommand] public void GoBack() { if (!IsBusy && CurrentStep > 1) { CurrentStep--; ClearResults(); } }
 
-    [RelayCommand] public async Task ValidateWorkspaceAsync()
+    [RelayCommand] public Task ValidateWorkspaceAsync() => ValidateWorkspaceForActionAsync(SelectedAction);
+
+    private async Task ValidateWorkspaceForActionAsync(string action)
     {
         if (_disposed || IsBusy) return;
         _validationCts?.Cancel(); _validationCts?.Dispose();
         var cts = new CancellationTokenSource(); _validationCts = cts;
         int version = _inputVersion;
-        string selectedPath = LocalPath, url = RepoUrl, action = SelectedAction;
+        string selectedPath = LocalPath, url = RepoUrl;
         _workspaceNeedsOwnershipRepair = false;
         WorkspaceValidationStatus = WorkspaceValidationStatus.Validating;
         WorkspaceValidationMessage = "Checking the workspace...";
@@ -264,15 +272,30 @@ public partial class MainViewModel : ObservableObject, IDisposable
         IsBranchTypeVisible = false; IsCommitTypeVisible = true;
     }
 
-    [RelayCommand(CanExecute = nameof(CanExecuteAction))] public async Task ExecuteActionAsync()
+    [RelayCommand(CanExecute = nameof(CanExecuteAction))] public Task ExecuteActionAsync() => StartActionAsync(SelectedAction);
+
+    private async Task StartActionAsync(string action)
     {
         // Revalidate for this action at execution time; cached UI flags never bypass these checks.
-        await ValidateWorkspaceAsync();
-        if (!CanExecuteAction || !await _gate.WaitAsync(0)) return;
-        var op = new Operation(SelectedAction, WorkspacePaths.Normalize(LocalPath), RepoUrl, Branch, _launchSettings.Load(LocalPath));
+        int version = _inputVersion;
+        await ValidateWorkspaceForActionAsync(action);
+        if (version != _inputVersion || !CanStartAction(action)) return;
+        Operation op;
+        try { op = new Operation(action, WorkspacePaths.Normalize(LocalPath), RepoUrl, Branch, _launchSettings.Load(LocalPath)); }
+        catch (Exception ex) { FinishFailure(ex); return; }
+        if (!await _gate.WaitAsync(0)) return;
         await RunOperationAsync(op);
     }
-    [RelayCommand] public Task RetryExecutionAsync() => IsDbSetupFormVisible ? RunDbSetupAsync() : ExecuteActionAsync();
+    [RelayCommand] public async Task RetryExecutionAsync()
+    {
+        if (IsBusy) return;
+        if (IsDbSetupFormVisible) { await RunDbSetupAsync(); return; }
+        var retry = _retryOperation;
+        if (retry == null) { await ExecuteActionAsync(); return; }
+        await ValidateWorkspaceForActionAsync(retry.Action);
+        if (!ReferenceEquals(_retryOperation, retry) || !CanStartAction(retry.Action) || !await _gate.WaitAsync(0)) return;
+        await RunOperationAsync(retry);
+    }
 
     private async Task RunOperationAsync(Operation op)
     {
@@ -294,7 +317,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
                     WriteCheckpoint(op);
                     ExecutionSuccess = true; IsExecutionFinished = true; IsBuildPromptVisible = true;
                     ExecutionSummaryText = "Branch and submodules updated. Build before running the new revision."; break;
-                case "Build": await RunApplicationAsync(op, true); break;
+                case "Build":
+                    await RunApplicationAsync(op, true);
+                    if (ExecutionSuccess && SelectedAction == "UpdateBranch") IsRunApplicationPromptVisible = true;
+                    break;
                 case "RunApplication": await RunApplicationAsync(op, false); break;
                 case "DatabaseSetup": ShowDatabaseForm(op.Path); ExecutionSummaryText = "Configure PostgreSQL and the workspace connection."; break;
                 default: throw new ArgumentException("Unknown setup action.");
@@ -306,11 +332,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     private void FinishCancelled()
     {
+        _retryOperation = _operation;
         ExecutionSuccess = false; IsExecutionFinished = true; CanRetryExecution = true; ExecutionSummaryText = "Operation cancelled. Completed changes have been retained.";
         foreach (var step in SetupSteps.Where(step => step.Status == StepStatus.Running)) step.Status = StepStatus.Pending;
     }
     private void FinishFailure(Exception ex)
     {
+        _retryOperation = _operation;
         ExecutionSuccess = false; IsExecutionFinished = true; CanRetryExecution = true; ExecutionSummaryText = ex.Message;
         _log.LogError("Operation", ex.Message, ex);
         if (!_disposed) MessageBox.Show(ex.Message + "\n\nCompleted changes have been retained. Review the log before retrying.", "Operation failed", MessageBoxButton.OK, MessageBoxImage.Error);
@@ -376,14 +404,18 @@ public partial class MainViewModel : ObservableObject, IDisposable
                 return true;
             }
             if (state.State == RepositoryState.NotARepository || !state.IsHealthy && state.State != RepositoryState.UnsafeRepository) throw new IOException(state.ErrorMessage);
-            var dialog = new RepoRecoveryDialog(state) { Owner = Application.Current.MainWindow };
+            var dialog = new RepoRecoveryDialog(state, allowStartFresh: op.Action is "Setup" or "Repair") { Owner = Application.Current.MainWindow };
             if (dialog.ShowDialog() != true) return false;
             bool recovered;
             switch (dialog.Result)
             {
                 case RepoRecoveryAction.Resume:
                 case RepoRecoveryAction.Repair: recovered = await _git.RepairRepositoryAsync(op.Path, LogGit, _cts.Token); break;
-                case RepoRecoveryAction.StartFresh: _git.CleanUpDirectory(op.Path); Directory.CreateDirectory(op.Path); return true;
+                case RepoRecoveryAction.StartFresh:
+                    if (op.Action is not ("Setup" or "Repair")) throw new InvalidOperationException("Start Fresh is available only during Setup. Update Branch retains the existing repository.");
+                    _git.CleanUpDirectory(op.Path);
+                    Directory.CreateDirectory(op.Path);
+                    return true;
                 case RepoRecoveryAction.Stash: recovered = await _git.StashChangesAsync(op.Path, _cts.Token); break;
                 case RepoRecoveryAction.Discard: recovered = await _git.DiscardChangesAsync(op.Path, _cts.Token); break;
                 case RepoRecoveryAction.AbortMerge: recovered = await _git.AbortMergeOrRebaseAsync(op.Path, _cts.Token); break;
@@ -413,8 +445,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     private Task<LaunchSettings?> PromptLaunchSettingsAsync(Operation op, string action)
     {
-        var settings = op.Settings;
-        string preferredRunMode = settings.ExecutionMode;
+        var settings = op.Settings.WithMode(op.Settings.ExecutionMode);
+        string preferredRunMode = op.PreferredRunMode;
         if (action is "Setup" or "Repair" or "Build") settings.ExecutionMode = "BuildOnly";
         var dialog = new LaunchConfigurationDialog(settings, action) { Owner = Application.Current.MainWindow };
         if (dialog.ShowDialog() != true) return Task.FromResult<LaunchSettings?>(null);
@@ -547,12 +579,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     private void SetStepStatus(SetupStepType type, StepStatus status) { var step = SetupSteps.FirstOrDefault(step => step.StepType == type); if (step != null) step.Status = status; }
 
-    [RelayCommand] public async Task ConfirmBuildAsync()
-    {
-        if (!Path.IsPathFullyQualified(LocalPath)) return;
-        if (IsBusy || !await _gate.WaitAsync(0)) return;
-        await RunOperationAsync(new("Build", WorkspacePaths.Normalize(LocalPath), RepoUrl, Branch, _launchSettings.Load(LocalPath)));
-    }
+    [RelayCommand] public Task ConfirmBuildAsync() => StartActionAsync("Build");
     [RelayCommand] public void DeclineBuild() { if (IsBusy) return; IsBuildPromptVisible = false; IsRunApplicationPromptVisible = true; ExecutionSuccess = true; IsExecutionFinished = true; ExecutionSummaryText = "Branch update completed; build skipped."; }
     [RelayCommand] public async Task ConfirmRunApplicationAsync() { if (IsBusy) return; SelectedAction = "RunApplication"; await ExecuteActionAsync(); }
     [RelayCommand] public void DeclineRunApplication() { IsRunApplicationPromptVisible = false; IsBuildResultsVisible = false; }

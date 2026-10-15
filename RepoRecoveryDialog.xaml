@@ -244,7 +244,7 @@
                     <StackPanel Orientation="Horizontal" Visibility="{Binding InterruptedSetupPanelVisibility}">
                         <Button Content="Resume Setup" Style="{StaticResource PrimaryButtonStyle}" Click="Resume_Click" Width="120" Margin="0,0,8,0" />
                         <Button Content="Repair Repository" Style="{StaticResource SecondaryButtonStyle}" Click="Repair_Click" Width="130" Margin="0,0,8,0" />
-                        <Button Content="Start Fresh" Style="{StaticResource DangerButtonStyle}" Click="StartFresh_Click" Width="110" Margin="0,0,8,0" />
+                        <Button x:Name="StartFreshButton" Content="Start Fresh" Visibility="{Binding StartFreshVisibility}" Style="{StaticResource DangerButtonStyle}" Click="StartFresh_Click" Width="110" Margin="0,0,8,0" />
                     </StackPanel>
 
                     <!-- Panel for Merge/Rebase -->

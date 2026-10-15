@@ -23,7 +23,8 @@ namespace BeaconSetupManager.Services
             CancellationToken cancellationToken = default,
             string? stdInput = null,
             System.Collections.Generic.Dictionary<string, string>? environmentVariables = null,
-            ProcessExecutionContext context = ProcessExecutionContext.CurrentUser);
+            ProcessExecutionContext context = ProcessExecutionContext.CurrentUser,
+            int? maximumCapturedOutputCharacters = null);
 
         bool StartBackground(
             string fileName,

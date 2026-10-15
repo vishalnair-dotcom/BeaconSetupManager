@@ -268,20 +268,25 @@ namespace BeaconSetupManager.Services
             Action<string>? onOutputLine,
             CancellationToken cancellationToken,
             string? stdInput,
-            Dictionary<string, string>? environmentVariables)
+            Dictionary<string, string>? environmentVariables,
+            int? maximumCapturedOutputCharacters = null)
             => RunNativeAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput,
-                environmentVariables, IsRunningAsAdmin(), ProcessExecutionContext.CurrentUser);
+                environmentVariables, IsRunningAsAdmin(), ProcessExecutionContext.CurrentUser, maximumCapturedOutputCharacters);
 
         public Task<ProcessResult> RunAsManagerAsync(string fileName, string arguments, string workingDirectory,
-            Action<string>? onOutputLine, CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables)
+            Action<string>? onOutputLine, CancellationToken cancellationToken, string? stdInput, Dictionary<string, string>? environmentVariables,
+            int? maximumCapturedOutputCharacters = null)
             => RunNativeAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput,
-                environmentVariables, false, ProcessExecutionContext.Elevated);
+                environmentVariables, false, ProcessExecutionContext.Elevated, maximumCapturedOutputCharacters);
 
         private async Task<ProcessResult> RunNativeAsync(string fileName, string arguments, string workingDirectory,
             Action<string>? onOutputLine, CancellationToken cancellationToken, string? stdInput,
-            Dictionary<string, string>? environmentVariables, bool interactiveToken, ProcessExecutionContext executionContext)
+            Dictionary<string, string>? environmentVariables, bool interactiveToken, ProcessExecutionContext executionContext,
+            int? maximumCapturedOutputCharacters)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var stdoutBuilder = new CapturedProcessOutput(maximumCapturedOutputCharacters);
+            var stderrBuilder = new CapturedProcessOutput(maximumCapturedOutputCharacters);
             var transported = PowerShellCommandTransport.Prepare(fileName, arguments, environmentVariables);
             arguments = transported.Arguments;
             environmentVariables = transported.Environment;
@@ -393,19 +398,13 @@ namespace BeaconSetupManager.Services
                 if (inheritableInRead != IntPtr.Zero) { CloseHandle(inheritableInRead); inheritableInRead = IntPtr.Zero; }
 
                 // Output readers
-                var stdoutBuilder = new StringBuilder();
-                var stderrBuilder = new StringBuilder();
-
                 var stdoutTask = Task.Run(async () =>
                 {
                     using var reader = new StreamReader(outPipe, Encoding.UTF8);
                     string? line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
-                        lock (stdoutBuilder)
-                        {
-                            stdoutBuilder.AppendLine(line);
-                        }
+                        stdoutBuilder.AppendLine(line);
                         lock (outputGate) { try { onOutputLine?.Invoke(line); } catch (Exception ex) { outputError ??= ex; } }
                     }
                 });
@@ -416,10 +415,7 @@ namespace BeaconSetupManager.Services
                     string? line;
                     while ((line = await reader.ReadLineAsync()) != null)
                     {
-                        lock (stderrBuilder)
-                        {
-                            stderrBuilder.AppendLine(line);
-                        }
+                        stderrBuilder.AppendLine(line);
                         lock (outputGate) { try { onOutputLine?.Invoke(line); } catch (Exception ex) { outputError ??= ex; } }
                     }
                 });

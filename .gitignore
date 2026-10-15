@@ -1,0 +1,39 @@
+# .NET build and publish output
+**/bin/
+**/obj/
+**/.nuget/packages/
+**/packages/
+/artifacts/
+*_wpftmp.csproj
+*.user
+*.suo
+*.pubxml.user
+
+# IDE and local agent state
+.vs/
+.idea/
+.vscode/
+.codex/
+.agents/
+.aws/
+
+# Logs, local configuration and credentials
+*.log
+*.tmp
+*.bak
+*.corrupt
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+appsettings.Local.json
+git_config.json
+launch_settings.json
+connections.config
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store

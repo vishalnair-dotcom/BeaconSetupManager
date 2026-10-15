@@ -1,0 +1,165 @@
+<Window x:Class="BeaconSetupManager.SetupIncompleteDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Setup Incomplete" 
+        Height="450" Width="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="{DynamicResource WindowBackgroundBrush}"
+        Foreground="{DynamicResource WindowTextBrush}"
+        BorderThickness="1.5"
+        BorderBrush="{DynamicResource DividerBrush}">
+    <Window.Resources>
+        <!-- Title style -->
+        <Style x:Key="DialogTitleStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="16" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Foreground" Value="{DynamicResource WindowTextBrush}" />
+        </Style>
+
+        <!-- Button Base Styles -->
+        <Style x:Key="ButtonBase" TargetType="Button">
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="Height" Value="36" />
+            <Setter Property="Cursor" Value="Hand" />
+        </Style>
+
+        <!-- Primary Button Style -->
+        <Style x:Key="PrimaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Name="Border" CornerRadius="6">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                    <GradientStop Color="#0020B2" Offset="0" />
+                                    <GradientStop Color="#00D07D" Offset="1" />
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="Opacity" Value="0.9" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Border" Property="Opacity" Value="0.75" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Secondary Button Style -->
+        <Style x:Key="SecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
+            <Setter Property="Foreground" Value="#00D07D" />
+            <Setter Property="Background" Value="Transparent" />
+            <Setter Property="BorderBrush" Value="{DynamicResource ControlBorderBrush}" />
+            <Setter Property="BorderThickness" Value="1.5" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Name="Border" CornerRadius="6" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource ButtonHoverBrush}" />
+                                <Setter TargetName="Border" Property="BorderBrush" Value="#0020B2" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource ButtonPressedBrush}" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <!-- Title Header -->
+            <RowDefinition Height="Auto" />
+            <!-- Contextual Message Alert -->
+            <RowDefinition Height="Auto" />
+            <!-- Steps Checklist -->
+            <RowDefinition Height="*" />
+            <!-- Actions Section -->
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Header -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Text="Setup Incomplete" Style="{StaticResource DialogTitleStyle}" />
+            <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="0,8,0,0" />
+        </StackPanel>
+
+        <!-- Alert Panel -->
+        <Border Grid.Row="1" Background="{DynamicResource NeutralAlertBackgroundBrush}" BorderBrush="{DynamicResource NeutralAlertBorderBrush}" BorderThickness="1.5" CornerRadius="6" Padding="12,10" Margin="0,0,0,12">
+            <TextBlock Text="{Binding ContextualMessage}" Foreground="{DynamicResource WindowTextBrush}" FontSize="13" FontWeight="SemiBold" TextWrapping="Wrap" />
+        </Border>
+
+        <!-- Checklist ListBox -->
+        <Border Grid.Row="2" Background="{DynamicResource CardBackgroundBrush}" BorderBrush="{DynamicResource DividerBrush}" BorderThickness="1.5" CornerRadius="8" Padding="8" Margin="0,0,0,16">
+            <ListBox ItemsSource="{Binding DisplaySteps}" Background="Transparent" BorderThickness="0" ScrollViewer.VerticalScrollBarVisibility="Auto">
+                <ListBox.ItemContainerStyle>
+                    <Style TargetType="ListBoxItem">
+                        <Setter Property="Focusable" Value="False" />
+                        <Setter Property="IsHitTestVisible" Value="False" />
+                        <Setter Property="Template">
+                            <Setter.Value>
+                                <ControlTemplate TargetType="ListBoxItem">
+                                    <Border Background="{Binding RowBackground}" BorderBrush="{Binding RowBorderBrush}" BorderThickness="{Binding RowBorderThickness}" CornerRadius="6" Padding="10,8" Margin="0,2">
+                                        <ContentPresenter />
+                                    </Border>
+                                </ControlTemplate>
+                            </Setter.Value>
+                        </Setter>
+                    </Style>
+                </ListBox.ItemContainerStyle>
+                <ListBox.ItemTemplate>
+                    <DataTemplate>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="24" />
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <!-- Status Icon -->
+                            <TextBlock Grid.Column="0" Text="{Binding StatusIcon}" Foreground="{Binding StatusColor}" FontWeight="Bold" FontSize="14" VerticalAlignment="Center" HorizontalAlignment="Center" />
+
+                            <!-- Step Name -->
+                            <TextBlock Grid.Column="1" Text="{Binding Name}" Foreground="{DynamicResource WindowTextBrush}" FontSize="13" VerticalAlignment="Center" Margin="8,0,0,0" />
+
+                            <!-- Status Text -->
+                            <TextBlock Grid.Column="2" Text="{Binding StatusText}" Foreground="{Binding StatusColor}" FontSize="12.5" FontWeight="SemiBold" VerticalAlignment="Center" />
+                        </Grid>
+                    </DataTemplate>
+                </ListBox.ItemTemplate>
+            </ListBox>
+        </Border>
+
+        <!-- Actions Panel -->
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Status Guidance -->
+            <TextBlock Grid.Column="0" Text="Complete all remaining steps to launch." FontSize="11" Foreground="{DynamicResource MutedTextBrush}" VerticalAlignment="Center" />
+
+            <!-- Buttons -->
+            <StackPanel Grid.Column="1" Orientation="Horizontal" HorizontalAlignment="Right">
+                <Button Content="{Binding PrimaryButtonContent}" Style="{StaticResource PrimaryButtonStyle}" Click="Primary_Click" Width="220" Margin="0,0,8,0" />
+                <Button Content="Cancel" Style="{StaticResource SecondaryButtonStyle}" Click="Cancel_Click" Width="95" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</Window>

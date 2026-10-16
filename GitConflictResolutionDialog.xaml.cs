@@ -12,6 +12,7 @@ namespace BeaconSetupManager
         {
             ConflictMessage = conflictMessage;
             InitializeComponent();
+            BeaconSetupManager.Services.WindowLayout.FitToWorkArea(this);
             DataContext = this;
         }
 

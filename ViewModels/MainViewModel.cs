@@ -7,7 +7,6 @@ using BeaconSetupManager.Models;
 using BeaconSetupManager.Services;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Npgsql;
 
 namespace BeaconSetupManager.ViewModels;
 
@@ -16,6 +15,8 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private readonly IPrerequisiteService _prerequisitesService;
     private readonly IGitService _git;
     private readonly IDatabaseService _database;
+    private readonly ISqlServerDatabaseService _sqlServer;
+    private readonly IDatabaseConnectionVerifier _databaseVerifier;
     private readonly IConfigService _config;
     private readonly ILogService _log;
     private readonly IAppLauncherService _launcher;
@@ -38,18 +39,21 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
     public event Action? OnLogCleared;
 
-    [ObservableProperty] private int _currentStep = 1;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(IsProgressIndeterminate)), NotifyPropertyChangedFor(nameof(ProgressLabel))] private int _currentStep = 1;
     [ObservableProperty] private string _selectedAction = "Setup";
-    [ObservableProperty] private string _selectedTheme = "Dark";
+    [ObservableProperty] private string _selectedTheme = "System";
     [ObservableProperty] private string _repoUrl = "https://quantumphinance.visualstudio.com/_git/InsightCorp";
     [ObservableProperty] private string _branch = "BeaconWeb";
     [ObservableProperty] private string _localPath = "";
     [ObservableProperty] private string _selectedBuildConfig = "Debug";
-    [ObservableProperty] private bool _isBusy;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(IsProgressIndeterminate)), NotifyPropertyChangedFor(nameof(ProgressLabel))] private bool _isBusy;
     [ObservableProperty] private bool _isSetupEnabled = true;
     [ObservableProperty] private bool _isAdminMode;
     [ObservableProperty] private string _busyMessage = "";
-    [ObservableProperty] private double _progressValue;
+    [ObservableProperty, NotifyPropertyChangedFor(nameof(ProgressLabel))] private double _progressValue;
+
+    public bool IsProgressIndeterminate => IsBusy && CurrentStep == 4;
+    public string ProgressLabel => IsProgressIndeterminate ? "Working…" : $"{ProgressValue:0}%";
     [ObservableProperty] private bool _isExecutionFinished, _executionSuccess, _canRetryExecution;
     [ObservableProperty] private string _executionSummaryText = "";
     [ObservableProperty] private bool _isRunApplicationPromptVisible, _isDbSetupFormVisible, _isBuildPromptVisible, _isBuildResultsVisible;
@@ -65,6 +69,24 @@ public partial class MainViewModel : ObservableObject, IDisposable
     [ObservableProperty] private bool _isRunningApplicationActive;
     [ObservableProperty] private string _dbHost = "localhost", _dbAdminUser = "postgres", _dbAdminPassword = "", _dbName = "Beacon", _dbUser = "BeaconUser", _dbPassword = "";
     [ObservableProperty] private string _dbPort = "5432";
+    [ObservableProperty] private DatabaseEngine _selectedDatabaseEngine = DatabaseEngine.PostgreSql;
+    [ObservableProperty] private bool _connectToExistingDatabase;
+    [ObservableProperty] private bool _trustSqlServerCertificate;
+    [ObservableProperty] private bool _configureExistingSqlDatabase;
+    public IReadOnlyList<KeyValuePair<DatabaseEngine, string>> DatabaseEngines { get; } = new[]
+    {
+        new KeyValuePair<DatabaseEngine, string>(DatabaseEngine.PostgreSql, "PostgreSQL"),
+        new KeyValuePair<DatabaseEngine, string>(DatabaseEngine.SqlServer, "SQL Server")
+    };
+    public bool IsSqlServer => SelectedDatabaseEngine == DatabaseEngine.SqlServer;
+    public bool IsPostgreSql => !IsSqlServer;
+    public bool IsDatabaseProvisioning => !ConnectToExistingDatabase;
+    public bool IsSqlServerProvisioning => IsSqlServer && IsDatabaseProvisioning;
+    public bool IsPostgreSqlProvisioning => IsPostgreSql && IsDatabaseProvisioning;
+    public string DatabaseServerLabel => IsSqlServer ? "SQL Server / instance (or host,port)" : "PostgreSQL Server Host";
+    public string DatabaseSubmitLabel => ConnectToExistingDatabase ? "Verify & save connection" : "Setup database & connection";
+    public string DatabaseSetupDescription => ConnectToExistingDatabase ? "Verify application credentials and save the connection. Existing databases and users are not changed." :
+        IsSqlServer ? "Create a database, SQL login and user. The application user receives db_owner in this database for Beacon schema upgrades." : "Create or verify the PostgreSQL database, role and extensions.";
     [ObservableProperty] private bool _updateExistingRolePassword, _updateExistingDatabaseOwner;
     [ObservableProperty] private string _statusSummary = "Scan dependencies to check installed tools.";
     public ObservableCollection<PrerequisiteItem> Prerequisites { get; } = new();
@@ -76,7 +98,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     public bool HasWorkspaceValidationMessage => !string.IsNullOrEmpty(WorkspaceValidationMessage);
     public bool HasLastSuccessfulVerificationText => !string.IsNullOrEmpty(LastSuccessfulVerificationText);
     public bool IsSourceMetadataVisible => SourceValidationStatus == "Success";
-    public bool HasPrerequisiteWarnings => Prerequisites.Any(item => item.Status is ValidationStatus.Missing or ValidationStatus.Failed or ValidationStatus.VersionMismatch);
+    public bool HasPrerequisiteWarnings => Prerequisites.Any(item => !item.IsOptional && item.Status is ValidationStatus.Missing or ValidationStatus.Failed or ValidationStatus.VersionMismatch);
     public bool CanExecuteAction => CanStartAction(SelectedAction);
     private bool CanStartAction(string action) => !_disposed && !IsBusy && IsWorkspaceValidated && (action is not ("Setup" or "UpdateBranch" or "Repair") ||
         (RepoValidationStatus == "Success" && (action is "Setup" or "Repair" || SourceValidationStatus == "Success" || _workspaceNeedsOwnershipRepair)));
@@ -85,9 +107,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     public MainViewModel(IPrerequisiteService prerequisiteService, IGitService gitService, IDatabaseService databaseService,
         IConfigService configService, ILogService logService, IAdminService adminService,
-        IAppLauncherService appLauncherService, IProcessRunner processRunner, ILaunchSettingsService launchSettingsService)
+        IAppLauncherService appLauncherService, IProcessRunner processRunner, ILaunchSettingsService launchSettingsService,
+        ISqlServerDatabaseService? sqlServerDatabaseService = null, IDatabaseConnectionVerifier? databaseConnectionVerifier = null)
     {
         _prerequisitesService = prerequisiteService; _git = gitService; _database = databaseService; _config = configService;
+        _sqlServer = sqlServerDatabaseService ?? new SqlServerDatabaseService();
+        _databaseVerifier = databaseConnectionVerifier ?? new DatabaseConnectionVerifier();
         _log = logService; _launcher = appLauncherService; _runner = processRunner; _launchSettings = launchSettingsService;
         IsAdminMode = adminService.IsRunningAsAdmin();
         _loading = true;
@@ -107,6 +132,26 @@ public partial class MainViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CanContinueToDbSetup));
         ExecuteActionCommand.NotifyCanExecuteChanged();
         ContinueToDbSetupCommand.NotifyCanExecuteChanged();
+    }
+    partial void OnSelectedDatabaseEngineChanged(DatabaseEngine oldValue, DatabaseEngine newValue)
+    {
+        if (newValue == DatabaseEngine.SqlServer) ConnectToExistingDatabase = false;
+        DbAdminUser = ""; DbAdminPassword = ""; DbUser = ""; DbPassword = "";
+        DbHost = IsSqlServer ? @"localhost\SQLEXPRESS" : "localhost";
+        TrustSqlServerCertificate = false;
+        UpdateExistingRolePassword = false; UpdateExistingDatabaseOwner = false; ConfigureExistingSqlDatabase = false;
+        NotifyDatabaseOptions();
+    }
+    partial void OnConnectToExistingDatabaseChanged(bool value)
+    {
+        DbAdminPassword = "";
+        UpdateExistingRolePassword = false; UpdateExistingDatabaseOwner = false; ConfigureExistingSqlDatabase = false;
+        NotifyDatabaseOptions();
+    }
+    private void NotifyDatabaseOptions()
+    {
+        foreach (var property in new[] { nameof(IsSqlServer), nameof(IsPostgreSql), nameof(IsDatabaseProvisioning), nameof(IsSqlServerProvisioning),
+            nameof(IsPostgreSqlProvisioning), nameof(DatabaseServerLabel), nameof(DatabaseSetupDescription), nameof(DatabaseSubmitLabel) }) OnPropertyChanged(property);
     }
     partial void OnIsBusyChanged(bool value) => EligibilityChanged();
     partial void OnRepoValidationStatusChanged(string value) => EligibilityChanged();
@@ -157,6 +202,26 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand] public void ToggleTheme() => SelectedTheme = SelectedTheme == "Dark" ? "Light" : "Dark";
+    public IReadOnlyList<string> AvailableThemes { get; } = ["System", "Light", "Dark"];
+
+    public async Task InitializeAsync()
+    {
+        await RefreshPrerequisitesAsync();
+        if (!IsBusy && CurrentStep == 1 && Prerequisites.Count > 0 &&
+            Prerequisites.Where(item => !item.IsOptional).All(item => item.Status == ValidationStatus.Installed))
+            CurrentStep = 2;
+    }
+
+    [RelayCommand] public async Task NavigateToStepAsync(string step)
+    {
+        if (IsBusy || !int.TryParse(step, out int page) || page is < 1 or > 4) return;
+        CurrentStep = page;
+        if (page == 3)
+        {
+            await ValidateWorkspaceAsync();
+            if (IsStandardConfigAction && _verifiedUrl != RepoUrl) await VerifyRepositoryAsync();
+        }
+    }
     [RelayCommand] public void SelectAction(string action) { if (!IsBusy && action is "Setup" or "UpdateBranch" or "DatabaseSetup" or "RunApplication") SelectedAction = action; }
     [RelayCommand] public async Task GoNextAsync()
     {
@@ -199,7 +264,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             else
             {
                 var workTree = await _runner.RunAsync("git", "rev-parse --is-inside-work-tree", path, cancellationToken: cts.Token);
-                if (workTree.ExitCode != 0 && workTree.StandardError.Contains("ownership", StringComparison.OrdinalIgnoreCase) && action is "Setup" or "Repair" or "UpdateBranch")
+                if (workTree.ExitCode != 0 && GitService.IsOwnershipError(workTree) && action is "Setup" or "Repair" or "UpdateBranch")
                 {
                     if (!Current()) return;
                     _workspaceNeedsOwnershipRepair = true;
@@ -231,7 +296,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (!await _gate.WaitAsync(0)) return;
         int version = _inputVersion; string url = RepoUrl;
-        IsBusy = true; BusyMessage = "Verifying repository access...";
+        IsBusy = true; BusyMessage = "Verifying repository access. Complete Git sign-in or MFA if prompted; use Cancel to stop.";
         _cts = new CancellationTokenSource();
         try
         {
@@ -250,7 +315,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     {
         if (!await _gate.WaitAsync(0)) return;
         int version = _inputVersion; string url = RepoUrl, source = Branch, path = LocalPath;
-        IsBusy = true; BusyMessage = "Validating source reference..."; SourceValidationStatus = "Validating";
+        IsBusy = true; BusyMessage = "Validating source reference. Complete Git sign-in or MFA if prompted; use Cancel to stop."; SourceValidationStatus = "Validating";
         _cts = new CancellationTokenSource();
         try
         {
@@ -315,6 +380,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
                     await StepAsync(SetupStepType.SubmodulesUpdate, () => _git.UpdateSubmodulesAsync(op.Path, LogGit, _cts.Token));
                     SetStepStatus(SetupStepType.RepositoryVerify, StepStatus.Completed); SetStepStatus(SetupStepType.WorkspaceValidate, StepStatus.Completed); SetStepStatus(SetupStepType.RepositoryClone, StepStatus.Completed);
                     WriteCheckpoint(op);
+                    ProgressValue = 100;
                     ExecutionSuccess = true; IsExecutionFinished = true; IsBuildPromptVisible = true;
                     ExecutionSummaryText = "Branch and submodules updated. Build before running the new revision."; break;
                 case "Build":
@@ -322,7 +388,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
                     if (ExecutionSuccess && SelectedAction == "UpdateBranch") IsRunApplicationPromptVisible = true;
                     break;
                 case "RunApplication": await RunApplicationAsync(op, false); break;
-                case "DatabaseSetup": ShowDatabaseForm(op.Path); ExecutionSummaryText = "Configure PostgreSQL and the workspace connection."; break;
+                case "DatabaseSetup": ShowDatabaseForm(op.Path); ExecutionSummaryText = "Configure the database and workspace connection."; break;
                 default: throw new ArgumentException("Unknown setup action.");
             }
         }
@@ -357,7 +423,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         if (!await RecoverRepositoryAsync(op)) { FinishCancelled(); return; }
         await StepAsync(SetupStepType.RepositoryVerify, async () => (await _git.VerifyRepositoryAccessAsync(op.Url, cancellationToken: _cts!.Token)).Success);
         await StepAsync(SetupStepType.WorkspaceValidate, () => Task.FromResult(Directory.Exists(op.Path)));
-        await StepAsync(SetupStepType.RepositoryClone, () => _git.CloneRepositoryAsync(op.Url, op.Path, LogGit, _cts!.Token));
+        await StepAsync(SetupStepType.RepositoryClone, () => _git.CloneRepositoryAsync(op.Url, op.Path, LogGit, _cts!.Token, op.Source));
         await CheckoutAsync(op);
         await StepAsync(SetupStepType.SubmodulesUpdate, () => _git.UpdateSubmodulesAsync(op.Path, LogGit, _cts!.Token));
         if (checkpoint?.CompletedSteps.Contains(SetupStepType.SolutionBuild) == true && checkpoint.CommitSha == GitCommitSha && checkpoint.BuildArtifactsHash == BuildArtifactsHash(op) && op.Action == "Setup")
@@ -369,6 +435,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         {
             await BuildAsync(op);
         }
+        ProgressValue = 85;
         WriteCheckpoint(op);
         ShowDatabaseForm(op.Path);
         ExecutionSummaryText = "Build succeeded. Continue to database configuration and connection verification.";
@@ -432,7 +499,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SetStepStatus(type, StepStatus.Running); BusyMessage = SetupSteps.First(step => step.StepType == type).Name;
         try { if (!await action()) throw new IOException(BusyMessage + " failed. Review command output."); SetStepStatus(type, StepStatus.Completed); }
         catch { SetStepStatus(type, StepStatus.Failed); throw; }
-        ProgressValue = Math.Min(85, ((int)type + 1) * 10);
+        ProgressValue = _operation?.Action == "UpdateBranch"
+            ? type == SetupStepType.BranchCheckout ? 50 : 100
+            : Math.Min(85, ((int)type + 1) * 10);
         if (_operation != null && WorkspacePaths.HasRepository(_operation.Path)) WriteCheckpoint(_operation);
     }
     private async Task BuildAsync(Operation op)
@@ -442,6 +511,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
         SetStepStatus(SetupStepType.PackagesRestore, code == 0 ? StepStatus.Completed : StepStatus.Failed);
         SetStepStatus(SetupStepType.SolutionBuild, code == 0 ? StepStatus.Completed : StepStatus.Failed);
         if (code != 0) throw new IOException($"Build exited with code {code}.");
+        ProgressValue = 85;
     }
     private Task<LaunchSettings?> PromptLaunchSettingsAsync(Operation op, string action)
     {
@@ -587,13 +657,21 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     private void ShowDatabaseForm(string path)
     {
+        // A different workspace must never inherit another workspace's database credentials.
+        SelectedDatabaseEngine = DatabaseEngine.PostgreSql;
+        ConnectToExistingDatabase = File.Exists(Path.Combine(path, "Config", "connections.config"));
+        DbHost = "localhost"; DbPort = "5432"; DbName = "Beacon"; DbUser = ""; DbPassword = "";
+        DbAdminUser = "postgres"; DbAdminPassword = ""; TrustSqlServerCertificate = false;
+        ConfigureExistingSqlDatabase = false; UpdateExistingRolePassword = false; UpdateExistingDatabaseOwner = false;
         if (File.Exists(Path.Combine(path, "Config", "connections.config")))
         {
             try
             {
-                var saved = new NpgsqlConnectionStringBuilder(ConfigService.ReadApplicationConnection(path));
-                DbHost = saved.Host ?? "localhost"; DbPort = saved.Port.ToString(System.Globalization.CultureInfo.InvariantCulture); DbName = saved.Database ?? "Beacon";
-                DbUser = saved.Username ?? "BeaconUser"; DbPassword = saved.Password ?? "";
+                var saved = ConfigService.ReadApplicationSettings(path);
+                SelectedDatabaseEngine = saved.Engine;
+                ConnectToExistingDatabase = saved.Engine == DatabaseEngine.PostgreSql;
+                DbHost = saved.Server; DbPort = saved.Port.ToString(System.Globalization.CultureInfo.InvariantCulture); DbName = saved.Database;
+                DbUser = saved.Username; DbPassword = saved.Password; TrustSqlServerCertificate = saved.TrustServerCertificate;
             }
             catch (Exception ex) { _log.LogWarning("Configuration", "Could not load the saved application connection: " + ex.Message); }
         }
@@ -605,20 +683,33 @@ public partial class MainViewModel : ObservableObject, IDisposable
         if (IsBusy || !await _gate.WaitAsync(0)) return;
         string path = LocalPath, host = DbHost, name = DbName, user = DbUser, password = DbPassword, adminUser = DbAdminUser, adminPassword = DbAdminPassword;
         int port = int.TryParse(DbPort, out var parsedPort) ? parsedPort : 0; bool updatePassword = UpdateExistingRolePassword, updateOwner = UpdateExistingDatabaseOwner;
+        var connectionSettings = new DatabaseConnectionSettings { Engine = SelectedDatabaseEngine, Server = host, Port = port, Database = name,
+            Username = user, Password = password, TrustServerCertificate = TrustSqlServerCertificate };
+        bool existing = ConnectToExistingDatabase, configureExisting = ConfigureExistingSqlDatabase;
+        ProgressValue = 0;
         IsBusy = true; IsExecutionFinished = false; ExecutionSuccess = false; CanRetryExecution = false; _cts = new CancellationTokenSource();
         try
         {
             using var workspaceLock = WorkspaceOperationLock.Acquire(path);
-            DatabaseService.ValidateInputs(host, name, user, port);
+            if (connectionSettings.Engine == DatabaseEngine.SqlServer) SqlServerDatabaseService.Validate(connectionSettings);
+            else DatabaseService.ValidateInputs(host, name, user, port);
+            if (string.IsNullOrEmpty(password)) throw new ArgumentException("Enter the application database password.");
             path = WorkspacePaths.Normalize(path);
             if (!Directory.Exists(Path.Combine(path, "SheetKraftWeb", "ConfigSamples", "Runner"))) throw new DirectoryNotFoundException("Select a repository with the configuration samples before setting up its database.");
-            BusyMessage = "Creating/verifying database objects..."; SetStepStatus(SetupStepType.DatabaseSetup, StepStatus.Running);
-            if (!await _database.SetupDatabaseAsync(host, adminUser, adminPassword, name, user, password, message => _log.LogInfo("Database", message), _cts.Token, port, updatePassword, updateOwner)) throw new IOException("Database setup failed. Review the database log; completed objects have been retained.");
+            BusyMessage = existing ? "Verifying existing database access..." : "Creating/verifying database objects..."; SetStepStatus(SetupStepType.DatabaseSetup, StepStatus.Running);
+            if (!existing)
+            {
+                if (connectionSettings.Engine == DatabaseEngine.SqlServer)
+                    await _sqlServer.SetupAsync(connectionSettings, adminUser, adminPassword, updatePassword, configureExisting, message => _log.LogInfo("Database", message), _cts.Token);
+                else if (!await _database.SetupDatabaseAsync(host, adminUser, adminPassword, name, user, password, message => _log.LogInfo("Database", message), _cts.Token, port, updatePassword, updateOwner))
+                    throw new IOException("Database setup failed. Review the database log; completed objects have been retained.");
+            }
             // Check the supplied app credentials before replacing a working configuration file.
-            var connection = new NpgsqlConnectionStringBuilder { Host = host, Port = port, Database = name, Username = user, Password = password, Timeout = 10 };
-            await using (var test = new NpgsqlConnection(connection.ConnectionString)) await test.OpenAsync(_cts.Token);
+            await _databaseVerifier.VerifyAsync(connectionSettings, _cts.Token);
             BusyMessage = "Updating workspace configuration...";
-            if (!await _config.SetupConfigurationAsync(path, host, name, user, password, onProgress: message => _log.LogInfo("Configuration", message), cancellationToken: _cts.Token, port: port)) throw new IOException("Configuration update failed. Review the log.");
+            if (!await _config.SetupConfigurationAsync(path, host, name, user, password, onProgress: message => _log.LogInfo("Configuration", message), cancellationToken: _cts.Token,
+                port: port, engine: connectionSettings.Engine, trustServerCertificate: connectionSettings.TrustServerCertificate)) throw new IOException("Configuration update failed. Review the log.");
+            ProgressValue = 50;
             SetStepStatus(SetupStepType.DatabaseSetup, StepStatus.Completed); SetStepStatus(SetupStepType.ConnectionValidation, StepStatus.Running);
             await VerifyConfiguredConnectionAsync(path, _cts.Token);
             SetStepStatus(SetupStepType.ConnectionValidation, StepStatus.Completed);
@@ -637,11 +728,9 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
         finally { EndOperation(); }
     }
-    private static async Task VerifyConfiguredConnectionAsync(string path, CancellationToken token)
+    private async Task VerifyConfiguredConnectionAsync(string path, CancellationToken token)
     {
-        var builder = new NpgsqlConnectionStringBuilder(ConfigService.ReadApplicationConnection(path)) { Timeout = 10, CommandTimeout = 15 };
-        await using var connection = new NpgsqlConnection(builder.ConnectionString);
-        await connection.OpenAsync(token);
+        await _databaseVerifier.VerifyAsync(ConfigService.ReadApplicationSettings(path), token);
     }
 
     [RelayCommand] public async Task RefreshPrerequisitesAsync()
@@ -668,7 +757,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             var items = await Task.Run(() => _prerequisitesService.ValidateAllAsync(onItemChecked: UpdateItem,
                 onProgress: message => { _log.LogInfo("Prerequisites", message); Ui(() => BusyMessage = message); }, cancellationToken: token), token);
             foreach (var item in items) UpdateItem(item);
-            StatusSummary = $"{items.Count} dependencies checked; {items.Count(item => item.Status is ValidationStatus.Missing or ValidationStatus.Failed or ValidationStatus.VersionMismatch)} need attention.";
+            StatusSummary = $"{items.Count} dependencies checked; {items.Count(item => !item.IsOptional && item.Status is ValidationStatus.Missing or ValidationStatus.Failed or ValidationStatus.VersionMismatch)} need attention.";
             OnPropertyChanged(nameof(HasPrerequisiteWarnings));
         }
         catch (OperationCanceledException) { StatusSummary = "Dependency scan cancelled."; }

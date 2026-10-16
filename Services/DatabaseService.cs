@@ -14,9 +14,9 @@ public class DatabaseService : IDatabaseService
     }
     private static string Connection(string host, string user, string password, string database, int port = 5432)
         => new NpgsqlConnectionStringBuilder { Host = host, Port = port, Username = user, Password = password, Database = database, Timeout = 10, CommandTimeout = 15 }.ConnectionString;
-    public async Task<bool> TestAdminConnectionAsync(string host, string adminUser, string adminPassword)
+    public async Task<bool> TestAdminConnectionAsync(string host, string adminUser, string adminPassword, int port = 5432)
     {
-        try { await using var connection = new NpgsqlConnection(Connection(host, adminUser, adminPassword, "postgres")); await connection.OpenAsync(); return true; }
+        try { await using var connection = new NpgsqlConnection(Connection(host, adminUser, adminPassword, "postgres", port)); await connection.OpenAsync(); return true; }
         catch { return false; }
     }
     public async Task<bool> SetupDatabaseAsync(string host, string adminUser, string adminPassword, string dbName, string dbUser, string dbPassword,
@@ -63,12 +63,12 @@ public class DatabaseService : IDatabaseService
         catch (OperationCanceledException) { throw; }
         catch (Exception ex) { onProgress?.Invoke("Database setup failed. Earlier completed changes are retained and may be reused on retry: " + ex.Message); return false; }
     }
-    public async Task<(bool DbExists, bool RoleExists, bool ExtensionsInstalled)> ValidateDatabaseSetupAsync(string host, string adminUser, string adminPassword, string dbName, string dbUser)
+    public async Task<(bool DbExists, bool RoleExists, bool ExtensionsInstalled)> ValidateDatabaseSetupAsync(string host, string adminUser, string adminPassword, string dbName, string dbUser, int port = 5432)
     {
-        ValidateInputs(host, dbName, dbUser, 5432);
+        ValidateInputs(host, dbName, dbUser, port);
         try
         {
-            await using var admin = new NpgsqlConnection(Connection(host, adminUser, adminPassword, "postgres"));
+            await using var admin = new NpgsqlConnection(Connection(host, adminUser, adminPassword, "postgres", port));
             await admin.OpenAsync();
             await using var dbCommand = new NpgsqlCommand("SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname=@name)", admin);
             dbCommand.Parameters.AddWithValue("name", dbName);
@@ -77,7 +77,7 @@ public class DatabaseService : IDatabaseService
             roleCommand.Parameters.AddWithValue("name", dbUser);
             bool role = (bool)(await roleCommand.ExecuteScalarAsync() ?? false);
             if (!db) return (false, role, false);
-            await using var target = new NpgsqlConnection(Connection(host, adminUser, adminPassword, dbName));
+            await using var target = new NpgsqlConnection(Connection(host, adminUser, adminPassword, dbName, port));
             await target.OpenAsync();
             await using var extensionCommand = new NpgsqlCommand("SELECT COUNT(*) FROM pg_extension WHERE extname IN ('citext','uuid-ossp')", target);
             return (db, role, (long)(await extensionCommand.ExecuteScalarAsync() ?? 0L) == 2);

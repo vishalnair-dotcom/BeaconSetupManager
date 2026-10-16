@@ -5,7 +5,7 @@ namespace BeaconSetupManager.Services
 {
     public interface IDatabaseService
     {
-        Task<bool> TestAdminConnectionAsync(string host, string adminUser, string adminPassword);
+        Task<bool> TestAdminConnectionAsync(string host, string adminUser, string adminPassword, int port = 5432);
 
         Task<bool> SetupDatabaseAsync(
             string host,
@@ -25,6 +25,7 @@ namespace BeaconSetupManager.Services
             string adminUser,
             string adminPassword,
             string dbName,
-            string dbUser);
+            string dbUser,
+            int port = 5432);
     }
 }

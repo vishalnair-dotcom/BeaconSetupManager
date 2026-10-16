@@ -4,7 +4,7 @@
         Title="Git Switch Conflict" 
         Height="400" Width="700"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip" MinWidth="680" MinHeight="300"
         ShowInTaskbar="False"
         Background="{DynamicResource WindowBackgroundBrush}"
         Foreground="{DynamicResource WindowTextBrush}"
@@ -56,7 +56,7 @@
 
         <!-- Secondary Button Style -->
         <Style x:Key="SecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
-            <Setter Property="Foreground" Value="#00D07D" />
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="{DynamicResource ControlBorderBrush}" />
             <Setter Property="BorderThickness" Value="1.5" />

@@ -1,5 +1,7 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
                     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="Controls.xaml" /></ResourceDictionary.MergedDictionaries>
+    <SolidColorBrush x:Key="AccentTextBrush" Color="#047857" />
     <!-- Theme Key Colors & Brushes -->
     <SolidColorBrush x:Key="WindowBackgroundBrush" Color="#F8FAFC" />
     <SolidColorBrush x:Key="WindowTextBrush" Color="#0F172A" />

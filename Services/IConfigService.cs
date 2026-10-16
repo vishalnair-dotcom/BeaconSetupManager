@@ -14,6 +14,8 @@ namespace BeaconSetupManager.Services
             bool isDatabaseSetup = false,
             Action<string>? onProgress = null,
             System.Threading.CancellationToken cancellationToken = default,
-            int port = 5432);
+            int port = 5432,
+            Models.DatabaseEngine engine = Models.DatabaseEngine.PostgreSql,
+            bool trustServerCertificate = false);
     }
 }

@@ -8,12 +8,16 @@
     <UseWPF>true</UseWPF>
     <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**</DefaultItemExcludes>
     <ApplicationIcon>app_icon.ico</ApplicationIcon>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <UseArtifactsOutput>false</UseArtifactsOutput>
+    <ArtifactsPath>$(MSBuildProjectDirectory)\artifacts</ArtifactsPath>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.9" />
     <PackageReference Include="Npgsql" Version="10.0.3" />
+    <PackageReference Include="Microsoft.Data.SqlClient" Version="7.0.1" />
     <PackageReference Include="Serilog" Version="4.3.1" />
     <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
     <PackageReference Include="System.ServiceProcess.ServiceController" Version="10.0.9" />

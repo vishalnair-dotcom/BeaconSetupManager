@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -40,7 +40,7 @@ namespace BeaconSetupManager.Services
             PrerequisiteItem vsItem;
             try { vsItem = ValidateVisualStudio2022(); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception ex) { vsItem = new PrerequisiteItem { Name = "Visual Studio 2022 Community", Status = ValidationStatus.Failed, Message = "Could not inspect Visual Studio: " + ex.Message }; }
+            catch (Exception ex) { vsItem = new PrerequisiteItem { Name = "Visual Studio 2022 Community", IsOptional = true, Status = ValidationStatus.Failed, Message = "Could not inspect Visual Studio: " + ex.Message }; }
             list.Add(vsItem);
             onItemChecked?.Invoke(vsItem);
 
@@ -62,12 +62,12 @@ namespace BeaconSetupManager.Services
 
             // 4. PostgreSQL
             BeginCheck(3);
-            onProgress?.Invoke("Validating PostgreSQL installation...");
-            var pgItem = ValidatePostgreSQLService();
+            onProgress?.Invoke("Scanning local PostgreSQL and SQL Server installations...");
+            var pgItem = DatabaseInstallationScanner.Scan(cancellationToken);
             list.Add(pgItem);
             onItemChecked?.Invoke(pgItem);
 
-            // 5. Node.js (if applicable)
+            // 5. Node.js
             BeginCheck(4);
             onProgress?.Invoke("Validating Node.js installation...");
             var nodeItem = await ValidateNodeJSAsync(cancellationToken);
@@ -87,6 +87,13 @@ namespace BeaconSetupManager.Services
             var scriptItem = await ValidateDotNetScriptAsync(cancellationToken);
             list.Add(scriptItem);
             onItemChecked?.Invoke(scriptItem);
+
+            // 8. TortoiseGit
+            BeginCheck(7);
+            onProgress?.Invoke("Validating TortoiseGit installation...");
+            var tortoiseItem = ValidateTortoiseGit();
+            list.Add(tortoiseItem);
+            onItemChecked?.Invoke(tortoiseItem);
 
             cancellationToken.ThrowIfCancellationRequested();
             onProgress?.Invoke("Prerequisite validation completed.");
@@ -139,7 +146,7 @@ namespace BeaconSetupManager.Services
 
         private async Task<PrerequisiteItem> ValidateNodeJSAsync(System.Threading.CancellationToken cancellationToken)
         {
-            var item = new PrerequisiteItem { Name = "Node.js (if applicable)", RequiredVersion = "Any", DownloadUrl = "https://nodejs.org/" };
+            var item = new PrerequisiteItem { Name = "Node.js", RequiredVersion = "Any", IsOptional = false, DownloadUrl = "https://nodejs.org/" };
             try
             {
                 var result = await _processRunner.RunAsync("node", "--version", cancellationToken: cancellationToken);
@@ -245,7 +252,7 @@ namespace BeaconSetupManager.Services
 
         private PrerequisiteItem ValidateTortoiseGit()
         {
-            var item = new PrerequisiteItem { Name = "TortoiseGit", RequiredVersion = "Any", DownloadUrl = "https://tortoisegit.org/download/" };
+            var item = new PrerequisiteItem { Name = "TortoiseGit", RequiredVersion = "Any", IsOptional = true, DownloadUrl = "https://tortoisegit.org/download/" };
 
             bool isInstalled = CheckRegistryKey(@"SOFTWARE\TortoiseGit", "Directory") ||
                                CheckRegistryKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\TortoiseGit_is1", "UninstallString") ||
@@ -267,29 +274,60 @@ namespace BeaconSetupManager.Services
 
         private PrerequisiteItem ValidateVisualStudio2022()
         {
-            var item = new PrerequisiteItem { Name = "Visual Studio 2022 Community", RequiredVersion = "17.x", IsOptional = false, DownloadUrl = "https://visualstudio.microsoft.com/downloads/" };
+            var item = new PrerequisiteItem { Name = "Visual Studio 2022 Community", RequiredVersion = "17.x", IsOptional = true, DownloadUrl = "https://visualstudio.microsoft.com/downloads/" };
 
             string? vsPath = null;
             string detectedEdition = "VS 2022";
 
-            // Check standard installation paths first for Community, Professional, and Enterprise
-            string[] defaultPaths = new[]
+            // Tier 1: Check via vswhere.exe if installed
+            try
             {
-                @"C:\Program Files\Microsoft Visual Studio\2022\Community",
-                @"C:\Program Files\Microsoft Visual Studio\2022\Professional",
-                @"C:\Program Files\Microsoft Visual Studio\2022\Enterprise"
-            };
-
-            foreach (var path in defaultPaths)
-            {
-                if (Directory.Exists(path))
+                string programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
+                string vswherePath = Path.Combine(programFilesX86, "Microsoft Visual Studio", "Installer", "vswhere.exe");
+                if (File.Exists(vswherePath))
                 {
-                    vsPath = path;
-                    break;
+                    var psi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = vswherePath,
+                        Arguments = "-version \"[17.0,18.0)\" -latest -property installationPath",
+                        RedirectStandardOutput = true,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    using var proc = System.Diagnostics.Process.Start(psi);
+                    if (proc != null)
+                    {
+                        string output = proc.StandardOutput.ReadToEnd().Trim();
+                        proc.WaitForExit(3000);
+                        if (!string.IsNullOrEmpty(output) && Directory.Exists(output))
+                        {
+                            vsPath = output;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Tier 2: Check standard installation paths across fixed drives
+            if (string.IsNullOrEmpty(vsPath) || !Directory.Exists(vsPath))
+            {
+                string[] editions = ["Community", "Professional", "Enterprise"];
+                foreach (var drive in DriveInfo.GetDrives().Where(d => d.DriveType == DriveType.Fixed))
+                {
+                    foreach (var edition in editions)
+                    {
+                        string candidate = Path.Combine(drive.RootDirectory.FullName, "Program Files", "Microsoft Visual Studio", "2022", edition);
+                        if (Directory.Exists(candidate))
+                        {
+                            vsPath = candidate;
+                            break;
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(vsPath)) break;
                 }
             }
 
-            // Fallback to registry checks if standard paths do not exist
+            // Tier 3: Fallback to registry checks
             if (string.IsNullOrEmpty(vsPath) || !Directory.Exists(vsPath))
             {
                 // Check 64-bit registry SxS VS7

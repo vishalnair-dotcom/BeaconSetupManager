@@ -4,7 +4,7 @@
         Title="Repository Health &amp; Recovery" 
         Height="500" Width="780"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize"
+        ResizeMode="CanResizeWithGrip" MinWidth="760" MinHeight="300"
         ShowInTaskbar="False"
         Background="{DynamicResource WindowBackgroundBrush}"
         Foreground="{DynamicResource WindowTextBrush}"
@@ -72,7 +72,7 @@
 
         <!-- Secondary Button Style -->
         <Style x:Key="SecondaryButtonStyle" TargetType="Button" BasedOn="{StaticResource ButtonBase}">
-            <Setter Property="Foreground" Value="#00D07D" />
+            <Setter Property="Foreground" Value="{DynamicResource AccentTextBrush}" />
             <Setter Property="Background" Value="Transparent" />
             <Setter Property="BorderBrush" Value="{DynamicResource ControlBorderBrush}" />
             <Setter Property="BorderThickness" Value="1.5" />
@@ -228,7 +228,7 @@
                 <!-- Recommendation box -->
                 <StackPanel Grid.Column="0" VerticalAlignment="Center">
                     <TextBlock Text="RECOMMENDED ACTION:" FontSize="10.5" FontWeight="Bold" Foreground="{DynamicResource SecondaryTextBrush}" />
-                    <TextBlock Text="{Binding RecommendedActionText}" FontSize="13.5" FontWeight="Bold" Foreground="#00D07D" />
+                    <TextBlock Text="{Binding RecommendedActionText}" FontSize="13.5" FontWeight="Bold" Foreground="{DynamicResource AccentTextBrush}" />
                 </StackPanel>
 
                 <!-- Dynamic Buttons panels depending on the state -->

@@ -5,6 +5,8 @@
     <UseWPF>true</UseWPF>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <UseArtifactsOutput>false</UseArtifactsOutput>
   </PropertyGroup>
   <ItemGroup><ProjectReference Include="..\BeaconSetupManager.csproj" /></ItemGroup>
 </Project>

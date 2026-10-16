@@ -198,11 +198,11 @@ namespace BeaconSetupManager.Services
             try
             {
                 IntPtr token = _interactiveProcessLauncher.GetInteractiveUserToken();
-                if (token == IntPtr.Zero) return;
+                if (token == IntPtr.Zero) throw new IOException("Could not identify the signed-in user for ownership repair.");
 
                 using var tokenHandle = new Microsoft.Win32.SafeHandles.SafeAccessTokenHandle(token);
                 using var identity = new System.Security.Principal.WindowsIdentity(tokenHandle.DangerousGetHandle());
-                if (identity.User == null) return;
+                if (identity.User == null) throw new IOException("The signed-in user has no Windows security identifier.");
 
                 var dirInfo = new System.IO.DirectoryInfo(path);
                 var sec = System.IO.FileSystemAclExtensions.GetAccessControl(dirInfo);

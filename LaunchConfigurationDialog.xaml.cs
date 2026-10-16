@@ -21,6 +21,7 @@ namespace BeaconSetupManager
         public LaunchConfigurationDialog(LaunchSettings settings, string actionType = "Run")
         {
             InitializeComponent();
+            BeaconSetupManager.Services.WindowLayout.FitToWorkArea(this);
             _settings = settings;
 
             if (actionType == "Setup" || actionType == "Repair" || actionType == "Build")

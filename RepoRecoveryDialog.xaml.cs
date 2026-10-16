@@ -156,6 +156,7 @@ namespace BeaconSetupManager
             }
 
             InitializeComponent();
+            BeaconSetupManager.Services.WindowLayout.FitToWorkArea(this);
             DataContext = this;
         }
 

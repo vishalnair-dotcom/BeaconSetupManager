@@ -20,8 +20,15 @@ internal static class Program
         SettingsStore.DirectoryOverride = Path.Combine(Scratch, "settings-store");
         try
         {
+            if (args.Contains("--ux-review")) { UxReview.Run(Root); return 0; }
+            if (args.Contains("--git-auth-only"))
+            {
+                RunGitAuthenticationAsync().GetAwaiter().GetResult();
+                Console.WriteLine($"PASS: {_passed} authentication checks.");
+                return 0;
+            }
             if (!args.Contains("--ui-only")) RunAsync().GetAwaiter().GetResult();
-            VerifyUi();
+            VerifyUi(args.Contains("--preview"));
             Console.WriteLine($"PASS: {_passed} regression checks.");
             return 0;
         }
@@ -36,6 +43,56 @@ internal static class Program
     { try { action(); } catch (T) { Check(true, name); return; } throw new Exception("Expected " + typeof(T).Name + ": " + name); }
     private static async Task RunAsync()
     {
+        await RunGitAuthenticationAsync();
+        var pg = new LocalDatabaseService("postgresql-x64-16", "PostgreSQL Server", "Running");
+        var sql = new LocalDatabaseService("MSSQL$SQLEXPRESS", "SQL Server (SQLEXPRESS)", "Stopped");
+        var localDatabases = DatabaseInstallationScanner.Describe(new[] { pg, sql });
+        Check(localDatabases.DetectedVersion == "Both installed" && localDatabases.Message.Contains("Running") && localDatabases.Message.Contains("Stopped"),
+            "Dependency scan reports both database engines and distinguishes service state from installation");
+        Check(DatabaseInstallationScanner.Describe(new[] { pg }).DetectedVersion == "PostgreSQL installed", "Dependency scan reports PostgreSQL-only installation");
+        Check(DatabaseInstallationScanner.Describe(new[] { sql }).DetectedVersion == "SQL Server installed", "Dependency scan reports SQL Server-only installation including stopped instances");
+        Check(DatabaseInstallationScanner.Describe(Array.Empty<LocalDatabaseService>()).Status == ValidationStatus.Missing,
+            "Dependency scan explicitly reports neither engine detected locally");
+        Check(DatabaseInstallationScanner.Describe(new[] { new LocalDatabaseService("SQLSERVERAGENT", "SQL Server Agent", "Running"),
+            new LocalDatabaseService("SQLBrowser", "SQL Server Browser", "Running") }).DetectedVersion == "Neither detected locally",
+            "SQL Agent and Browser are not mistaken for a SQL database engine");
+        Check(DatabaseInstallationScanner.Describe(new[] { sql, new LocalDatabaseService("MSSQLSERVER", "SQL Server", "Running") }).Message.Contains("MSSQLSERVER (Running)"),
+            "Dependency scan lists default and named SQL Server instances");
+        var actualDatabaseScan = DatabaseInstallationScanner.Scan();
+        Console.WriteLine("LOCAL DATABASE SCAN: " + actualDatabaseScan.Message.Replace('\n', ' '));
+        await SqlServerRegression.RunAsync(Scratch, Check);
+        bool rejectedPort = false;
+        try { await new DatabaseService().ValidateDatabaseSetupAsync("localhost", "admin", "fixture", "app", "app_user", port: 0); }
+        catch (ArgumentException) { rejectedPort = true; }
+        Check(rejectedPort, "PostgreSQL setup validation uses the explicitly supplied port");
+        var optionalRunner = new FakeRunner(); var optionalLog = new TestLog();
+        var optionalPrerequisites = new OptionalPrerequisites();
+        using (var optionalModel = new MainViewModel(optionalPrerequisites, new GitService(optionalRunner, optionalLog), new DatabaseService(), new ConfigService(),
+            optionalLog, new FakeAdmin(), new AppLauncherService(optionalRunner, optionalLog), optionalRunner, new FakeSettings()))
+        {
+            await optionalModel.RefreshPrerequisitesAsync();
+            Check(optionalModel.Prerequisites.Count == 8 && optionalModel.Prerequisites.Any(item => item.Name == "TortoiseGit" && item.IsOptional),
+                "Merged dependency scan retains the optional TortoiseGit card alongside both database engines");
+            Check(!optionalModel.HasPrerequisiteWarnings && optionalModel.StatusSummary == "8 dependencies checked; 0 need attention.",
+                "Missing or failed optional tools do not inflate required dependency warnings or summary");
+            optionalModel.Prerequisites.Single(item => item.Name == "Node.js").Status = ValidationStatus.Missing;
+            Check(optionalModel.HasPrerequisiteWarnings, "A missing required dependency still raises a warning");
+            Check(!optionalModel.Prerequisites.Single(item => item.Name == "Node.js").IsOptional, "Node.js is required");
+            optionalModel.Prerequisites.Single(item => item.Name == "Node.js").Status = ValidationStatus.Installed;
+            await optionalModel.InitializeAsync();
+            Check(optionalModel.CurrentStep == 2, "Startup skips to Choose action when required tools are installed");
+            await optionalModel.NavigateToStepAsync("4");
+            Check(optionalModel.CurrentStep == 4, "Direct navigation opens progress without running an action");
+            optionalModel.IsBusy = true;
+            await optionalModel.NavigateToStepAsync("1");
+            Check(optionalModel.CurrentStep == 4, "Direct navigation is blocked during operations");
+            optionalModel.IsBusy = false;
+            optionalPrerequisites.MissingNode = true;
+            optionalModel.CurrentStep = 1;
+            await optionalModel.InitializeAsync();
+            Check(optionalModel.CurrentStep == 1 && optionalModel.HasPrerequisiteWarnings, "Missing Node.js keeps startup on prerequisites");
+            Check(optionalModel.SelectedTheme == "System" && optionalModel.AvailableThemes.SequenceEqual(new[] { "System", "Light", "Dark" }), "Appearance defaults to System with explicit light and dark choices");
+        }
         foreach (var argument in new[] { "", "one word", "a\"b", "C:\\folder with spaces\\", "C:\\plain\\", "apostrophe's" })
             Check(CommandArguments.Split(CommandArguments.Quote(argument)).SequenceEqual(new[] { argument }), "Windows argument round trip: " + argument);
         Throws<ArgumentException>(() => CommandArguments.Split("--name \"unterminated"), "Reject unmatched argument quotes");
@@ -48,6 +105,15 @@ internal static class Program
         Check(File.ReadAllText(Path.Combine(userFolder, "keep.txt")) == "keep", "Rejected cleanup retains existing files");
         try { await git.CloneRepositoryAsync("https://example.invalid/repo", userFolder); throw new Exception("Nonempty clone allowed"); }
         catch (IOException) { Check(File.Exists(Path.Combine(userFolder, "keep.txt")), "Clone refuses nonempty destination without deleting it"); }
+        var ownershipRunner = new FakeRunner();
+        var ownershipGit = new GitService(ownershipRunner, new TestLog());
+        foreach (string ownershipError in new[] { "fatal: detected dubious ownership in repository", "fatal: unsafe repository (is owned by someone else)" })
+        {
+            ownershipRunner.Response = _ => FakeRunner.Result(128, "", ownershipError);
+            var failedCheckout = await ownershipGit.CheckoutAndValidateLocalAsync("main", userFolder);
+            Check(!failedCheckout.Success && failedCheckout.ErrorMessage!.Contains("Fix Ownership"), "Ownership errors are diagnosed before resolving origin: " + ownershipError);
+            Check((await ownershipGit.AnalyzeRepositoryAsync(userFolder, "", "main")).State == RepositoryState.UnsafeRepository, "Ownership error enables recovery for both old and new Git versions");
+        }
 
         var checkpoint = Path.Combine(Scratch, "settings.json");
         File.WriteAllText(checkpoint, "{bad json");
@@ -182,6 +248,37 @@ internal static class Program
         var localGit = new GitService(localRunner, new TestLog());
         Check((await localGit.CheckoutAndValidateLocalAsync("main", repo)).Success, "Local branch checkout and fast-forward verification");
         var sha = (await localRunner.RunAsync("git", "rev-parse HEAD", repo)).StandardOutput.Trim();
+        string validationCache = Path.Combine(Scratch, "remote-only validation");
+        var remoteBranch = await localGit.ValidateBranchOrCommitAsync(origin, "main", validationCache);
+        Check(remoteBranch.Success && remoteBranch.CommitSha == sha && !Directory.Exists(validationCache), "Remote branch validation downloads no repository or checkout");
+        await localRunner.RunAsync("git", "tag -a review-tag -m review", repo);
+        await localRunner.RunAsync("git", "push origin review-tag", repo);
+        var remoteTag = await localGit.ValidateBranchOrCommitAsync(origin, "review-tag", validationCache);
+        Check(remoteTag.Success && remoteTag.CommitSha == sha && !Directory.Exists(validationCache), "Annotated remote tag resolves to its commit without cloning");
+        Check(!(await localGit.ValidateBranchOrCommitAsync(origin, "missing-branch", validationCache)).Success && !Directory.Exists(validationCache), "Missing branch fails without creating a cache");
+        Check((await localGit.ValidateBranchOrCommitAsync(origin, sha, validationCache)).Success &&
+            !File.Exists(Path.Combine(validationCache, "file with spaces.txt")), "Full commit validation fetches objects without checking out source files");
+        // file:// exercises real shallow transport; a plain local path ignores --depth.
+        await localRunner.RunAsync("git", "symbolic-ref HEAD refs/heads/main", origin);
+        File.WriteAllText(Path.Combine(repo, "history.txt"), "second");
+        await localRunner.RunAsync("git", "add history.txt", repo);
+        await localRunner.RunAsync("git", "commit -m second", repo);
+        await localRunner.RunAsync("git", "push origin main", repo);
+        string shallowRepo = Path.Combine(Scratch, "shallow repo");
+        await localRunner.RunAsync("git", "push origin " + sha + ":refs/heads/other-branch", repo);
+        Check(await localGit.CloneRepositoryAsync(new Uri(origin + Path.DirectorySeparatorChar).AbsoluteUri, shallowRepo), "Fresh clone supports shallow transport");
+        Check((await localRunner.RunAsync("git", "show-ref --verify refs/remotes/origin/other-branch", shallowRepo)).ExitCode != 0 &&
+            (await localRunner.RunAsync("git", "tag --list", shallowRepo)).StandardOutput.Trim() == "", "Fresh clone excludes unrelated branches and tags");
+        string selectedClone = Path.Combine(Scratch, "selected branch clone");
+        Check(await localGit.CloneRepositoryAsync(new Uri(origin + Path.DirectorySeparatorChar).AbsoluteUri, selectedClone, sourceReference: "other-branch") &&
+            (await localRunner.RunAsync("git", "rev-parse HEAD", selectedClone)).StandardOutput.Trim() == sha, "Fresh clone starts directly on the selected branch");
+        Check((await localGit.CheckoutAndValidateLocalAsync("main", selectedClone)).Success &&
+            (await localRunner.RunAsync("git", "show-ref --verify refs/tags/review-tag", selectedClone)).ExitCode != 0, "Switching branches fetches the selected branch without unrelated tags");
+        Check((await localRunner.RunAsync("git", "rev-parse --is-shallow-repository", shallowRepo)).StandardOutput.Trim() == "true", "Fresh clone starts with depth one");
+        Check((await localGit.CheckoutAndValidateLocalAsync("main", shallowRepo)).Success &&
+            (await localRunner.RunAsync("git", "rev-parse --is-shallow-repository", shallowRepo)).StandardOutput.Trim() == "true", "Current branch checkout keeps the clone shallow");
+        Check((await localGit.CheckoutAndValidateLocalAsync(sha[..8], shallowRepo)).Success &&
+            (await localRunner.RunAsync("git", "rev-parse HEAD", shallowRepo)).StandardOutput.Trim() == sha, "Older abbreviated commits download missing history automatically");
         Check((await localGit.CheckoutAndValidateLocalAsync(sha[..8], repo)).Success, "Resolve abbreviated commit reference");
         File.WriteAllText(Path.Combine(repo, "untracked file.txt"), "user data");
         var state = await localGit.AnalyzeRepositoryAsync(repo, "", "");
@@ -202,13 +299,32 @@ internal static class Program
         Check(await localGit.StashChangesAsync(repo) && File.ReadAllText(nestedFile) == "first", "Recovery stashes tracked edits inside submodules");
         File.WriteAllText(Path.Combine(repo, "nested-module", "untracked nested.txt"), "nested untracked");
         Check(await localGit.DiscardChangesAsync(repo) && !File.Exists(Path.Combine(repo, "nested-module", "untracked nested.txt")), "Explicit discard also clears untracked submodule files");
-        fake.Response = args => args.Contains("pull") ? FakeRunner.Result(1, "", "cannot fast-forward") :
+        fake.Response = args => args.Contains("merge") && args.Contains("--ff-only") ? FakeRunner.Result(1, "", "cannot fast-forward") :
             args.Contains("rev-parse") ? FakeRunner.Result(0, sha) : FakeRunner.Result(0);
         Check(!(await git.CheckoutAndValidateLocalAsync("main", repo)).Success, "A failed pull cannot report successful checkout");
+        var submoduleRunner = new LocalRunner(real, allowFileTransport: true);
+        var submoduleGit = new GitService(submoduleRunner, new TestLog());
+        string submoduleRoot = Path.Combine(Scratch, "submodule compatibility");
+        string fileOrigin = new Uri(origin + Path.DirectorySeparatorChar).AbsoluteUri;
+        Check(await submoduleGit.CloneRepositoryAsync(fileOrigin, submoduleRoot, sourceReference: "main"), "Prepare real submodule compatibility fixture");
+        File.WriteAllText(Path.Combine(submoduleRoot, ".gitmodules"), "[submodule \"fixture\"]\n\tpath = fixture\n\turl = " + fileOrigin + "\n");
+        var gitlink = await submoduleRunner.RunAsync("git", "update-index --add --cacheinfo 160000," + sha + ",fixture", submoduleRoot);
+        if (gitlink.ExitCode != 0) throw new IOException(gitlink.StandardError);
+        Check(await submoduleGit.UpdateSubmodulesAsync(submoduleRoot), "Real submodule initialization avoids hidden-pointer write failures");
+        string fixturePointer = Path.Combine(submoduleRoot, "fixture", ".git");
+        string pointerContents = File.ReadAllText(fixturePointer);
+        File.SetAttributes(fixturePointer, File.GetAttributes(fixturePointer) | FileAttributes.Hidden);
+        Check(await submoduleGit.UpdateSubmodulesAsync(submoduleRoot) && File.ReadAllText(fixturePointer) == pointerContents &&
+            (File.GetAttributes(fixturePointer) & FileAttributes.Hidden) == 0, "Retry repairs an existing hidden pointer without changing its contents");
+        Check((await submoduleRunner.RunAsync("git", "rev-parse HEAD", Path.Combine(submoduleRoot, "fixture"))).StandardOutput.Trim() == sha,
+            "Shallow submodule update checks out the recorded older commit");
+        File.WriteAllText(Path.Combine(submoduleRoot, ".gitmodules"), "[submodule \"outside\"]\n\tpath = ../../outside\n");
+        try { await submoduleGit.UpdateSubmodulesAsync(submoduleRoot); throw new Exception("Outside submodule path accepted"); }
+        catch (IOException) { Check(true, "Submodule pointer recovery rejects paths outside the workspace"); }
 
-        // Load the provided legacy script but execute only safe fake-build fixtures.
-        string beacon = @"C:\Users\QP-202208\Desktop\BeaconCode\BeaconWebdotnet9Upgrade\run.ps1";
-        if (File.Exists(beacon))
+        // Keep the supported legacy contract stable even when a developer's Beacon checkout changes.
+        string beacon = Path.Combine(Root, "Tests", "Fixtures", "legacy-run.ps1");
+        if (!File.Exists(beacon)) throw new FileNotFoundException("The legacy launch regression fixture is missing.", beacon);
         {
             string source = File.ReadAllText(beacon);
             Throws<NotSupportedException>(() => LaunchScriptAdapter.Adapt(source + "\nWrite-Output 'custom cleanup'"), "Reject legacy adaptation that would bypass custom cleanup logic");
@@ -279,12 +395,11 @@ internal static class Program
             }
             finally { listen.Stop(); }
         }
-        else Console.WriteLine("SKIP: actual Beacon legacy script is not present.");
         // Eligibility and identity invalidation do not require a WPF window or modal dialogs.
         var scanService = new PausedPrerequisites();
         using (var scanModel = new MainViewModel(scanService, git, new DatabaseService(), config, new TestLog(), new FakeAdmin(), new AppLauncherService(fake, new TestLog()), fake, new FakeSettings()))
         {
-            Check(scanModel.Prerequisites.Count == 7 && scanModel.Prerequisites.All(item => item.Status == ValidationStatus.Pending), "All dependency cards exist before scanning");
+            Check(scanModel.Prerequisites.Count == 8 && scanModel.Prerequisites.All(item => item.Status == ValidationStatus.Pending), "All dependency cards exist before scanning");
             var scan = scanModel.RefreshPrerequisitesAsync();
             await scanService.Paused.Task.WaitAsync(TimeSpan.FromSeconds(10));
             Check(scanModel.IsBusy && scanModel.Prerequisites[0].Status == ValidationStatus.Installed && scanModel.Prerequisites[1].Status == ValidationStatus.Running && scanModel.Prerequisites.Skip(2).All(item => item.Status == ValidationStatus.Pending), "Dependency results stream while remaining checks are waiting");
@@ -298,7 +413,7 @@ internal static class Program
             await scanService.Paused.Task.WaitAsync(TimeSpan.FromSeconds(10));
             scanService.Continue.SetResult();
             await scan;
-            Check(scanModel.Prerequisites.Count == 7 && scanModel.Prerequisites.All(item => item.Status == ValidationStatus.Installed) && scanModel.ProgressValue == 100, "Rescan finishes all existing dependency cards without duplicates");
+            Check(scanModel.Prerequisites.Count == 8 && scanModel.Prerequisites.All(item => item.Status == ValidationStatus.Installed) && scanModel.ProgressValue == 100, "Rescan finishes all existing dependency cards without duplicates");
         }
         using var vm = new MainViewModel(new FakePrerequisites(), git, new DatabaseService(), config, new TestLog(), new FakeAdmin(), new AppLauncherService(fake, new TestLog()), fake, new FakeSettings());
         vm.SelectedAction = "Build"; vm.WorkspaceValidationStatus = WorkspaceValidationStatus.Success; vm.RepoValidationStatus = "Failed";
@@ -320,7 +435,29 @@ internal static class Program
         await vm.ValidateWorkspaceAsync();
         Check(vm.CanExecuteAction && vm.WorkspaceValidationStatus == WorkspaceValidationStatus.Warning, "Ownership warning allows explicit recovery instead of blocking the recovery UI");
     }
-    private static void VerifyUi()
+    private static async Task RunGitAuthenticationAsync()
+    {
+        var runner = new CredentialPromptRunner();
+        var git = new GitService(runner, new TestLog());
+        // The previous 30-second timeout terminated both the command and its sign-in dialog.
+        var repository = git.VerifyRepositoryAccessAsync("https://example.invalid/repo");
+        var source = git.ValidateBranchOrCommitAsync("https://example.invalid/repo", "main", Path.Combine(Scratch, "auth-cache"));
+        await Task.WhenAll(repository, source);
+        Check(repository.Result.Success, "Repository verification allows sign-in to take longer than 30 seconds");
+        Check(source.Result.Success, "Source verification allows sign-in to take longer than 30 seconds");
+        foreach (bool validateSource in new[] { false, true })
+        {
+            using var cancelled = new CancellationTokenSource();
+            var pending = validateSource
+                ? git.ValidateBranchOrCommitAsync("https://example.invalid/repo", "main", Path.Combine(Scratch, "auth-cache"), cancellationToken: cancelled.Token)
+                : git.VerifyRepositoryAccessAsync("https://example.invalid/repo", cancellationToken: cancelled.Token);
+            cancelled.Cancel();
+            try { await pending; throw new Exception("Git authentication ignored cancellation"); }
+            catch (OperationCanceledException) { Check(true, "User cancellation still stops " + (validateSource ? "source" : "repository") + " authentication"); }
+        }
+    }
+
+    private static void VerifyUi(bool preview = false)
     {
         var app = new System.Windows.Application { ShutdownMode = System.Windows.ShutdownMode.OnExplicitShutdown };
         app.Resources.MergedDictionaries.Add(new System.Windows.ResourceDictionary { Source = new Uri("/BeaconSetupManager;component/Themes/DarkTheme.xaml", UriKind.Relative) });
@@ -328,17 +465,143 @@ internal static class Program
         using var model = new MainViewModel(new FakePrerequisites(), new GitService(runner, log), new DatabaseService(), new ConfigService(), log, new FakeAdmin(), new AppLauncherService(runner, log), runner, new FakeSettings());
         var window = new BeaconSetupManager.MainWindow(model, log);
         window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.Background);
+        var progressBar = (System.Windows.Controls.ProgressBar)window.FindName("ExecutionProgressBar");
+        model.CurrentStep = 4;
+        foreach (string action in new[] { "Setup", "UpdateBranch", "DatabaseSetup", "Build", "RunApplication" })
+        {
+            model.SelectedAction = action;
+            model.IsBusy = true;
+            window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.DataBind);
+            Check(progressBar.IsIndeterminate && model.ProgressLabel == "Working…", action + " shows animated activity while running");
+            model.IsBusy = false;
+            model.ProgressValue = 100;
+            window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.DataBind);
+            Check(!progressBar.IsIndeterminate && progressBar.Value == 100 && model.ProgressLabel == "100%", action + " stops activity and displays completed progress");
+        }
+        progressBar.ApplyTemplate();
+        progressBar.Measure(new System.Windows.Size(300, 8));
+        progressBar.Arrange(new System.Windows.Rect(0, 0, 300, 8));
+        progressBar.UpdateLayout();
+        var track = progressBar.Template.FindName("PART_Track", progressBar) as System.Windows.FrameworkElement;
+        var indicator = progressBar.Template.FindName("PART_Indicator", progressBar) as System.Windows.FrameworkElement;
+        Check(track != null && indicator != null && indicator.ActualWidth > 0 && Math.Abs(indicator.ActualWidth - track.ActualWidth) < 2,
+            "Progress template draws a full indicator at 100 percent");
+        model.SelectedAction = "Setup"; model.CurrentStep = 1; model.ProgressValue = 0;
+        string updatePath = Path.Combine(Scratch, "update-progress-workspace");
+        Directory.CreateDirectory(Path.Combine(updatePath, ".git"));
+        string updateUrl = "https://example.invalid/beacon";
+        string updateSha = new('a', 40);
+        MainViewModel? updateModel = null;
+        bool sawCheckoutProgress = false;
+        var updateRunner = new FakeRunner { Response = arguments =>
+        {
+            var parts = CommandArguments.Split(arguments);
+            if (parts.Contains("rev-parse")) return FakeRunner.Result(0,
+                parts.Contains("--absolute-git-dir") ? Path.Combine(updatePath, ".git") :
+                parts.Contains("--is-inside-work-tree") ? "true" : parts.Contains("--is-shallow-repository") ? "false" : updateSha);
+            if (parts.Contains("config") && parts.Contains("remote.origin.url")) return FakeRunner.Result(0, updateUrl);
+            if (parts.Contains("ls-remote")) return FakeRunner.Result(0, updateSha + "\trefs/heads/main\n");
+            if (parts.Contains("show")) return FakeRunner.Result(0, "Author\0Date\0Message");
+            if (parts.Contains("submodule") && parts.Contains("update")) sawCheckoutProgress = updateModel?.ProgressValue == 50 && updateModel.IsProgressIndeterminate;
+            return FakeRunner.Result(0);
+        } };
+        using (updateModel = new MainViewModel(new FakePrerequisites(), new GitService(updateRunner, log), new DatabaseService(), new ConfigService(), log,
+            new FakeAdmin(), new AppLauncherService(updateRunner, log), updateRunner, new FakeSettings()))
+        {
+            updateModel.SelectedAction = "UpdateBranch"; updateModel.LocalPath = updatePath; updateModel.RepoUrl = updateUrl; updateModel.Branch = "main";
+            updateModel.RepoValidationStatus = "Success"; updateModel.SourceValidationStatus = "Success";
+            RunUiTask(updateModel.ExecuteActionAsync);
+            Check(sawCheckoutProgress, "Update Branch advances to 50 percent between checkout and submodule completion");
+            Check(updateModel.ExecutionSuccess && updateModel.ProgressValue == 100 && !updateModel.IsProgressIndeterminate,
+                "Successful Update Branch finishes at 100 percent and stops animation");
+        }
         var password = (System.Windows.Controls.PasswordBox)window.FindName("AppDbPasswordBox");
         password.Password = "fixture-password";
         Check(model.DbPassword == "fixture-password", "Masked password input updates an initially empty view-model password");
         model.DbPassword = "changed-fixture";
         Check(password.Password == "changed-fixture", "Password binding also updates from the view model");
+        var sqlChoice = (System.Windows.Controls.RadioButton)window.FindName("SqlServerDatabaseChoice");
+        var postgresChoice = (System.Windows.Controls.RadioButton)window.FindName("PostgreSqlDatabaseChoice");
+        Check(postgresChoice.IsChecked == true && sqlChoice.IsChecked == false, "Database cards visibly identify the default PostgreSQL selection");
+        sqlChoice.IsChecked = true;
+        window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        Check(model.IsSqlServer && sqlChoice.IsChecked == true && postgresChoice.IsChecked == false && model.DatabaseServerLabel.Contains("instance"), "SQL Server card switches the provider and clears the other selection");
+        model.SelectedDatabaseEngine = DatabaseEngine.PostgreSql;
+        window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+        Check(postgresChoice.IsChecked == true && sqlChoice.IsChecked == false, "Database cards reflect restored provider settings");
+        sqlChoice.IsChecked = true;
+        model.ConnectToExistingDatabase = true;
+        Check(!model.IsDatabaseProvisioning && !model.IsPostgreSqlProvisioning && model.DatabaseSubmitLabel.Contains("Verify"), "Connect-existing selection hides provisioning options and changes the submit action");
+        SqlServerRegression.VerifyUi(Scratch, RunUiTask, Check);
         foreach (string theme in new[] { "Light", "Dark" })
         {
             app.Resources.MergedDictionaries.Clear();
             app.Resources.MergedDictionaries.Add(new System.Windows.ResourceDictionary { Source = new Uri("/BeaconSetupManager;component/Themes/" + theme + "Theme.xaml", UriKind.Relative) });
             foreach (string key in new[] { "WarningAlertBackgroundBrush", "WarningAlertBorderBrush", "WarningAlertTextBrush" })
                 Check(window.TryFindResource(key) is System.Windows.Media.Brush, theme + " theme resolves " + key);
+            var themedDialog = new BeaconSetupManager.LaunchConfigurationDialog(new LaunchSettings(), "Run");
+            var configChoice = (System.Windows.Controls.ComboBox)themedDialog.FindName("CbConfiguration");
+            var runChoice = (System.Windows.Controls.RadioButton)themedDialog.FindName("RbRunOnly");
+            configChoice.ApplyTemplate();
+            Check(configChoice.Foreground.ToString() == ((System.Windows.Media.Brush)window.FindResource("WindowTextBrush")).ToString() &&
+                runChoice.Foreground.ToString() == configChoice.Foreground.ToString(), theme + " launch inputs and radio labels follow the theme");
+            configChoice.SelectedIndex = 1;
+            Check(configChoice.SelectedItem is System.Windows.Controls.ComboBoxItem chosen && chosen.Content?.ToString() == "Release", theme + " styled dropdown preserves selection");
+            WindowLayout.ApplyBounds(themedDialog, new System.Windows.Rect(0, 0, 900, 460));
+            Check(themedDialog.Height <= 436 && themedDialog.MinHeight <= themedDialog.MaxHeight, theme + " launch dialog fits a short display work area");
+            themedDialog.Close();
+            foreach (var size in new[] { new System.Windows.Size(800, 540), new System.Windows.Size(900, 620) })
+            foreach (var engine in new[] { DatabaseEngine.PostgreSql, DatabaseEngine.SqlServer })
+            foreach (bool existing in new[] { false, true })
+            {
+                model.CurrentStep = 4; model.IsDbSetupFormVisible = true;
+                model.SelectedDatabaseEngine = engine; model.ConnectToExistingDatabase = existing;
+                window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                var root = (System.Windows.FrameworkElement)window.Content;
+                root.Measure(size); root.Arrange(new System.Windows.Rect(new System.Windows.Point(), size)); root.UpdateLayout();
+                var form = (System.Windows.FrameworkElement)window.FindName("DatabaseConfigurationForm");
+                var submit = (System.Windows.FrameworkElement)window.FindName("DatabaseSubmitButton");
+                System.Windows.Rect Bounds(System.Windows.FrameworkElement element) => element.TransformToAncestor(root).TransformBounds(new System.Windows.Rect(element.RenderSize));
+                var formBounds = Bounds(form); var submitBounds = Bounds(submit);
+                var connectionModeBounds = Bounds((System.Windows.FrameworkElement)window.FindName("ExistingDatabaseOption"));
+                bool connectionModeBelowChoices = connectionModeBounds.Top >= Math.Max(Bounds(sqlChoice).Bottom, Bounds(postgresChoice).Bottom) + 3;
+                var names = new List<string> { "DatabaseServerInput", "DatabaseNameInput", "DatabaseAppUserInput", "AppDbPasswordBox" };
+                if (engine == DatabaseEngine.PostgreSql) names.Add("DatabasePortInput");
+                if (!existing) names.AddRange(new[] { "DatabaseAdminUserInput", "AdminDbPasswordBox", "DatabaseProvisioningOptions" });
+                if (!existing && engine == DatabaseEngine.SqlServer) names.AddRange(new[] { "UpdateExistingLoginOption", "ConfigureExistingSqlDatabaseOption" });
+                bool fits = connectionModeBelowChoices && formBounds.Top >= 0 && formBounds.Bottom <= size.Height && submitBounds.Bottom <= formBounds.Bottom + 1 &&
+                    names.Select(name => Bounds((System.Windows.FrameworkElement)window.FindName(name))).All(bounds => bounds.Width > 0 && bounds.Height > 0 &&
+                        bounds.Left >= formBounds.Left - 1 && bounds.Right <= formBounds.Right + 1 && bounds.Top >= formBounds.Top && bounds.Bottom <= submitBounds.Top - 4);
+                Check(fits, $"Database fields fit without scrolling: {theme}, {engine}, existing={existing}, {size.Width}x{size.Height}");
+            }
+            model.CurrentStep = 3; model.SelectedAction = "Setup"; model.IsDbSetupFormVisible = false;
+            var narrowRoot = (System.Windows.FrameworkElement)window.Content;
+            narrowRoot.Measure(new System.Windows.Size(800, 540)); narrowRoot.Arrange(new System.Windows.Rect(0, 0, 800, 540)); narrowRoot.UpdateLayout();
+            var validateSource = (System.Windows.FrameworkElement)window.FindName("ValidateSourceButton");
+            var sourceBounds = validateSource.TransformToAncestor(narrowRoot).TransformBounds(new System.Windows.Rect(validateSource.RenderSize));
+            Check(sourceBounds.Right <= narrowRoot.ActualWidth && sourceBounds.Width >= 100, theme + " source validation button stays visible at minimum width");
+            model.CurrentStep = 4; model.IsDbSetupFormVisible = true;
+            narrowRoot.Measure(new System.Windows.Size(800, 460)); narrowRoot.Arrange(new System.Windows.Rect(0, 0, 800, 460)); narrowRoot.UpdateLayout();
+            var fallback = (System.Windows.Controls.ScrollViewer)window.FindName("ActivePageScroll");
+            Check(fallback.VerticalScrollBarVisibility == System.Windows.Controls.ScrollBarVisibility.Auto && fallback.ScrollableHeight > 0,
+                theme + " exceptionally short work areas keep content reachable through fallback scrolling");
+            model.IsDbSetupFormVisible = false;
+            if (preview)
+            {
+                model.SelectedDatabaseEngine = DatabaseEngine.SqlServer;
+                model.CurrentStep = 4; model.IsDbSetupFormVisible = true; model.ConnectToExistingDatabase = false;
+                window.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
+                var content = (System.Windows.FrameworkElement)window.Content;
+                content.Measure(new System.Windows.Size(900, 620));
+                content.Arrange(new System.Windows.Rect(0, 0, 900, 620));
+                content.UpdateLayout();
+                var bitmap = new System.Windows.Media.Imaging.RenderTargetBitmap(900, 620, 96, 96, System.Windows.Media.PixelFormats.Pbgra32);
+                bitmap.Render(content);
+                var encoder = new System.Windows.Media.Imaging.PngBitmapEncoder();
+                encoder.Frames.Add(System.Windows.Media.Imaging.BitmapFrame.Create(bitmap));
+                using var imageFile = File.Create(Path.Combine(Root, "artifacts", "validation", "database-cards-" + theme.ToLowerInvariant() + ".png"));
+                encoder.Save(imageFile);
+            }
         }
         var recovery = new BeaconSetupManager.RepoRecoveryDialog(new RepositoryAnalysisResult { State = RepositoryState.SubmodulesUninitialized }, allowStartFresh: false);
         recovery.Dispatcher.Invoke(() => { }, System.Windows.Threading.DispatcherPriority.ApplicationIdle);
@@ -380,7 +643,7 @@ internal static class Program
             new System.Windows.Interop.WindowInteropHelper(window).EnsureHandle();
             app.MainWindow = window;
             RunUiTask(retryModel.ConfirmBuildAsync);
-            Check(retryLauncher.Calls == 1 && retryModel.CanRetryExecution && !retryModel.IsBusy, "Cancelled optional build offers retry and releases operation state");
+            Check(retryLauncher.Calls == 1 && retryModel.CanRetryExecution && !retryModel.IsBusy && !retryModel.IsProgressIndeterminate, "Cancelled optional build stops progress activity and releases operation state");
             commands.Clear();
             RunUiTask(retryModel.RetryExecutionAsync);
             Check(retryLauncher.Calls == 2 && retryModel.ExecutionSuccess && retryModel.SelectedAction == "UpdateBranch" &&
@@ -447,10 +710,20 @@ internal class FakeRunner : IProcessRunner
     public void EnsureDirectoryExists(string path) => Directory.CreateDirectory(path);
     public bool FixDirectoryOwnership(string path) => false;
 }
-internal sealed class LocalRunner(ProcessRunner runner) : FakeRunner
+internal sealed class CredentialPromptRunner : FakeRunner
+{
+    public override async Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser, int? maximumCapturedOutputCharacters = null)
+    {
+        await Task.Delay(TimeSpan.FromSeconds(31), cancellationToken);
+        string sha = new('a', 40);
+        return Result(0, sha + "\tHEAD\n" + sha + "\trefs/heads/main\n");
+    }
+}
+
+internal sealed class LocalRunner(ProcessRunner runner, bool allowFileTransport = false) : FakeRunner
 {
     public override Task<ProcessResult> RunAsync(string fileName, string arguments, string workingDirectory = "", Action<string>? onOutputLine = null, CancellationToken cancellationToken = default, string? stdInput = null, Dictionary<string, string>? environmentVariables = null, ProcessExecutionContext context = ProcessExecutionContext.CurrentUser, int? maximumCapturedOutputCharacters = null)
-        => runner.RunAsync(fileName, arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated, maximumCapturedOutputCharacters);
+        => runner.RunAsync(fileName, allowFileTransport && fileName == "git" ? "-c protocol.file.allow=always " + arguments : arguments, workingDirectory, onOutputLine, cancellationToken, stdInput, environmentVariables, ProcessExecutionContext.Elevated, maximumCapturedOutputCharacters);
 }
 internal sealed class ScriptFixtureRunner(ProcessRunner runner, int buildExitCode) : FakeRunner
 {
@@ -481,6 +754,22 @@ internal class FakePrerequisites : IPrerequisiteService
     public virtual Task<List<PrerequisiteItem>> ValidateAllAsync(Action<PrerequisiteItem>? onItemChecked = null, Action<string>? onProgress = null, CancellationToken cancellationToken = default) => Task.FromResult(new List<PrerequisiteItem>());
     public Task<(bool Success, string ErrorMessage)> ValidateGitAccessAsync(string repoUrl) => Task.FromResult((true, ""));
     public Task<bool> ApproveGitCredentialsAsync(string repoUrl, string username, string password) => Task.FromResult(true);
+}
+internal sealed class OptionalPrerequisites : FakePrerequisites
+{
+    public bool MissingNode { get; set; }
+    public override Task<List<PrerequisiteItem>> ValidateAllAsync(Action<PrerequisiteItem>? onItemChecked = null, Action<string>? onProgress = null, CancellationToken cancellationToken = default)
+    {
+        var items = PrerequisiteItem.CreatePendingItems();
+        foreach (var item in items)
+        {
+            item.Status = item.IsOptional ? ValidationStatus.Missing : ValidationStatus.Installed;
+            if (item.Name == "Visual Studio 2022 Community") item.Status = ValidationStatus.Failed;
+            if (item.Name == "Node.js" && MissingNode) item.Status = ValidationStatus.Missing;
+            onItemChecked?.Invoke(item);
+        }
+        return Task.FromResult(items);
+    }
 }
 internal sealed class PausedPrerequisites : FakePrerequisites
 {

@@ -36,7 +36,8 @@ namespace BeaconSetupManager.Services
             string repoUrl,
             string localPath,
             Action<string>? onProgress = null,
-            CancellationToken cancellationToken = default);
+            CancellationToken cancellationToken = default,
+            string? sourceReference = null);
 
         Task<GitValidationResult> CheckoutAndValidateLocalAsync(
             string branchOrCommit,

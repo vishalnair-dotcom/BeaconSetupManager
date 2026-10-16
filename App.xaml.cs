@@ -46,6 +46,7 @@ namespace BeaconSetupManager
             // 3. Start Main Window
             var savedTheme = LoadSavedTheme();
             ChangeTheme(savedTheme);
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged += OnSystemPreferenceChanged;
 
             var mainWindow = ServiceProvider.GetRequiredService<MainWindow>();
             var viewModel = ServiceProvider.GetRequiredService<MainViewModel>();
@@ -66,7 +67,7 @@ namespace BeaconSetupManager
                 if (System.IO.File.Exists(ThemeFilePath))
                 {
                     string content = System.IO.File.ReadAllText(ThemeFilePath).Trim();
-                    if (content == "Light" || content == "Dark")
+                    if (content is "Light" or "Dark" or "System")
                     {
                         return content;
                     }
@@ -74,9 +75,9 @@ namespace BeaconSetupManager
             }
             catch
             {
-                // Fallback to default Dark
+                // Follow Windows when no saved preference is available.
             }
-            return "Dark"; // Default
+            return "System";
         }
 
         public void SaveTheme(string themeName)
@@ -102,19 +103,30 @@ namespace BeaconSetupManager
         {
             try
             {
-                if (themeName is not ("Light" or "Dark")) throw new ArgumentException("Unknown theme.");
-                var newDict = new ResourceDictionary { Source = new Uri($"Themes/{themeName}Theme.xaml", UriKind.Relative) };
+                if (themeName is not ("Light" or "Dark" or "System")) throw new ArgumentException("Unknown theme.");
+                string effectiveTheme = themeName;
+                if (themeName == "System")
+                {
+                    effectiveTheme = "Light";
+                    try
+                    {
+                        if (Microsoft.Win32.Registry.GetValue(@"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", "AppsUseLightTheme", 1) is int light && light == 0)
+                            effectiveTheme = "Dark";
+                    }
+                    catch { /* Use light when the Windows preference is unavailable. */ }
+                }
+                var newDict = new ResourceDictionary { Source = new Uri($"Themes/{effectiveTheme}Theme.xaml", UriKind.Relative) };
                 // Clear old theme dictionary
                 var themeDict = Resources.MergedDictionaries
                     .FirstOrDefault(d => d.Source != null && d.Source.OriginalString.Contains("Theme.xaml"));
 
                 if (themeDict != null)
                 {
-                    Resources.MergedDictionaries.Remove(themeDict);
+                    Resources.MergedDictionaries[Resources.MergedDictionaries.IndexOf(themeDict)] = newDict;
                 }
 
                 // Load new theme
-                Resources.MergedDictionaries.Add(newDict);
+                else Resources.MergedDictionaries.Add(newDict);
                 
                 SaveTheme(themeName);
             }
@@ -124,8 +136,17 @@ namespace BeaconSetupManager
             }
         }
 
+        private void OnSystemPreferenceChanged(object sender, Microsoft.Win32.UserPreferenceChangedEventArgs e)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (ServiceProvider.GetService<MainViewModel>()?.SelectedTheme == "System") ChangeTheme("System");
+            }));
+        }
+
         protected override void OnExit(ExitEventArgs e)
         {
+            Microsoft.Win32.SystemEvents.UserPreferenceChanged -= OnSystemPreferenceChanged;
             (ServiceProvider as IDisposable)?.Dispose();
             Serilog.Log.CloseAndFlush();
             base.OnExit(e);
@@ -139,6 +160,8 @@ namespace BeaconSetupManager
             services.AddSingleton<IPrerequisiteService, PrerequisiteService>();
             services.AddSingleton<IGitService, GitService>();
             services.AddSingleton<IDatabaseService, DatabaseService>();
+            services.AddSingleton<ISqlServerDatabaseService, SqlServerDatabaseService>();
+            services.AddSingleton<IDatabaseConnectionVerifier, DatabaseConnectionVerifier>();
             services.AddSingleton<IConfigService, ConfigService>();
             services.AddSingleton<IAdminService, AdminService>();
             services.AddSingleton<ILogService, LogService>();

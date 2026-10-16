@@ -15,6 +15,7 @@ namespace BeaconSetupManager
         public MainWindow(MainViewModel viewModel, ILogService logService)
         {
             InitializeComponent();
+            BeaconSetupManager.Services.WindowLayout.FitToWorkArea(this, mainWindow: true);
             DataContext = viewModel;
             _logService = logService;
 
@@ -37,10 +38,19 @@ namespace BeaconSetupManager
             // Auto-refresh prerequisites on load
             Loaded += async (s, e) =>
             {
-                await viewModel.RefreshPrerequisitesAsync();
+                await viewModel.InitializeAsync();
             };
             Closing += (_, _) => viewModel.CancelOperation();
             Closed += (_, _) => { viewModel.Dispose(); _logService.OnMessageLogged -= LogService_OnMessageLogged; };
+        }
+
+        private void ActivePageScroll_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            // Normal layouts keep their own scrolling behavior. Very short display work areas
+            // need an outer fallback so controls stay reachable without shrinking the text.
+            if (sender is System.Windows.Controls.ScrollViewer scroll)
+                scroll.VerticalScrollBarVisibility = e.NewSize.Height < 360
+                    ? System.Windows.Controls.ScrollBarVisibility.Auto : System.Windows.Controls.ScrollBarVisibility.Disabled;
         }
 
         private void LogService_OnMessageLogged(LogMessage log)
